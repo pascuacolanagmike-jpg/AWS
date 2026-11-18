@@ -1,4 +1,228 @@
-<!DOCTYPE html>
+'use strict';
+
+/**
+ * AGRIWEATHER — Philippine Farm Forecast
+ * Zero-dependency Node.js server (built-in http + fetch).
+ *
+ *   node server.js
+ *   -> http://localhost:3000
+ *
+ * External services (all free, no key):
+ *   - Open-Meteo          weather + soil data
+ *   - Nominatim           reverse geocoding
+ *   - OpenStreetMap       map tiles
+ *
+ * Storm Watch is a heuristic risk indicator, not an official typhoon
+ * forecast. Always follow PAGASA advisories.
+ */
+
+const http = require('http');
+const { URL } = require('url');
+
+const PORT = process.env.PORT || 3000;
+
+if (typeof fetch !== 'function') {
+  console.error('[AgriWeather] Node.js 18+ is required (global fetch missing). You are on ' + process.version);
+  process.exit(1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  In-memory cache                                                    */
+/* ------------------------------------------------------------------ */
+
+const CACHE = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+async function getJSON(url, extraHeaders = {}, timeoutMs = 6000) {
+  const hit = CACHE.get(url);
+  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.data;
+
+  const headers = {
+    'Accept': 'application/json',
+    'User-Agent': 'AgriWeather/1.0 (Philippine farm forecast)',
+    ...extraHeaders
+  };
+
+  const opts = { headers };
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    opts.signal = AbortSignal.timeout(timeoutMs);
+  }
+
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error('Upstream responded with ' + res.status);
+
+  const data = await res.json();
+  CACHE.set(url, { at: Date.now(), data });
+  if (CACHE.size > 250) CACHE.delete(CACHE.keys().next().value);
+  return data;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Response helper                                                    */
+/* ------------------------------------------------------------------ */
+
+function sendJSON(res, status, body, cacheSeconds) {
+  if (res.headersSent) return;
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': cacheSeconds ? 'public, max-age=' + cacheSeconds : 'no-store',
+    'Access-Control-Allow-Origin': '*'
+  });
+  res.end(JSON.stringify(body));
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: reverse geocode                                               */
+/* ------------------------------------------------------------------ */
+
+async function handleReverse(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return sendJSON(res, 400, { error: 'lat and lon are required' });
+  }
+
+  try {
+    const url =
+      'https://nominatim.openstreetmap.org/reverse?format=json&zoom=12&accept-language=en' +
+      '&lat=' + lat + '&lon=' + lon;
+
+    const data = await getJSON(url, {}, 5000);
+    const a = (data && data.address) || {};
+
+    const name =
+      a.city || a.town || a.village || a.municipality ||
+      a.county || a.state_district || a.state || 'Your location';
+
+    sendJSON(res, 200, {
+      name: name,
+      region: a.state || a.region || '',
+      country: a.country || ''
+    }, 3600);
+  } catch (err) {
+    sendJSON(res, 200, {
+      name: 'Your location', region: '', country: '',
+      error: String(err.message || err)
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: weather forecast                                              */
+/* ------------------------------------------------------------------ */
+
+async function handleWeather(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (
+    !Number.isFinite(lat) || !Number.isFinite(lon) ||
+    Math.abs(lat) > 90 || Math.abs(lon) > 180
+  ) {
+    return sendJSON(res, 400, { error: 'Valid lat and lon are required' });
+  }
+
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    current: [
+      'temperature_2m',
+      'relative_humidity_2m',
+      'apparent_temperature',
+      'is_day',
+      'weather_code',
+      'pressure_msl',
+      'wind_speed_10m',
+      'wind_direction_10m',
+      'wind_gusts_10m',
+      'precipitation'
+    ].join(','),
+    hourly: [
+      'temperature_2m',
+      'relative_humidity_2m',
+      'precipitation_probability',
+      'precipitation',
+      'pressure_msl',
+      'wind_speed_10m',
+      'wind_direction_10m',
+      'wind_gusts_10m',
+      'soil_moisture_0_to_1cm',
+      'soil_moisture_1_to_3cm',
+      'soil_moisture_3_to_9cm',
+      'soil_moisture_9_to_27cm',
+      'soil_temperature_0cm',
+      'soil_temperature_6cm',
+      'soil_temperature_18cm',
+      'soil_temperature_54cm',
+      'evapotranspiration'
+    ].join(','),
+    daily: [
+      'weather_code',
+      'temperature_2m_max',
+      'temperature_2m_min',
+      'precipitation_sum',
+      'precipitation_probability_max',
+      'wind_speed_10m_max',
+      'wind_gusts_10m_max',
+      'et0_fao_evapotranspiration',
+      'sunrise',
+      'sunset'
+    ].join(','),
+    timezone: 'auto',
+    forecast_days: '7'
+  });
+
+  try {
+    const data = await getJSON('https://api.open-meteo.com/v1/forecast?' + params.toString());
+    sendJSON(res, 200, data, 300);
+  } catch (err) {
+    sendJSON(res, 502, { error: String(err.message || err) });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: vegetation conditions (soil feed)                             */
+/* ------------------------------------------------------------------ */
+
+async function handleNdvi(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return sendJSON(res, 400, { error: 'lat and lon are required' });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      latitude: String(lat),
+      longitude: String(lon),
+      hourly: [
+        'soil_moisture_0_to_1cm',
+        'soil_moisture_1_to_3cm',
+        'soil_moisture_3_to_9cm',
+        'soil_moisture_9_to_27cm',
+        'soil_temperature_6cm',
+        'soil_temperature_18cm',
+        'evapotranspiration'
+      ].join(','),
+      daily: 'et0_fao_evapotranspiration,precipitation_sum',
+      timezone: 'auto',
+      forecast_days: '3'
+    });
+
+    const data = await getJSON('https://api.open-meteo.com/v1/forecast?' + params.toString());
+    sendJSON(res, 200, { source: 'soil-feed', data }, 1800);
+  } catch (err) {
+    sendJSON(res, 502, { error: String(err.message || err) });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  The UI                                                             */
+/* ------------------------------------------------------------------ */
+
+const PAGE = `<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8" />
@@ -113,8 +337,6 @@
 
   .wrap { width: 100%; max-width: 1320px; margin: 0 auto; padding: 0 24px; }
 
-  /* ---------------- top bar ---------------- */
-
   .topbar {
     position: sticky;
     top: 0;
@@ -206,8 +428,6 @@
 
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ---------------- shell / loading ---------------- */
-
   .shell { position: relative; z-index: 1; padding: 24px 0 64px; }
 
   .skeleton-grid { display: flex; flex-direction: column; gap: 18px; }
@@ -231,8 +451,6 @@
   .sk-row .sk { height: 118px; }
   .sk-row2 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .sk-row2 .sk { height: 260px; }
-
-  /* ---------------- error ---------------- */
 
   .error-card {
     display: flex; gap: 16px; align-items: flex-start;
@@ -262,8 +480,6 @@
   .btn:focus-visible { outline: none; box-shadow: var(--ring); }
   .btn--ghost { background: var(--surface); color: var(--ink); border-color: var(--border-2); }
   .btn--ghost:hover { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-soft); box-shadow: none; }
-
-  /* ---------------- location bar ---------------- */
 
   .loc-bar {
     display: flex; align-items: flex-end; justify-content: space-between;
@@ -300,8 +516,6 @@
   }
   .stamp b { color: var(--ink-2); font-weight: 700; }
 
-  /* ---------------- hero ---------------- */
-
   .hero {
     display: grid;
     grid-template-columns: minmax(0, .92fr) minmax(0, 1.28fr);
@@ -309,8 +523,6 @@
     align-items: stretch;
     margin-bottom: 14px;
   }
-
-  /* now card */
 
   .now-card {
     position: relative;
@@ -404,8 +616,6 @@
   .now-foot > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
   .now-foot .k { font-size: 9.5px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; opacity: .72; }
   .now-foot b { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
-
-  /* map */
 
   .map-card {
     position: relative;
@@ -505,8 +715,6 @@
   .recenter:hover { color: var(--brand); border-color: var(--brand); }
   .recenter:focus-visible { outline: none; box-shadow: var(--ring); }
 
-  /* ---------------- metric tiles ---------------- */
-
   .metrics {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -564,8 +772,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* ---------------- board / cards ---------------- */
-
   .board {
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -618,8 +824,6 @@
   .pill[data-tone="danger"]  { color: var(--danger); background: var(--danger-soft); }
   .pill[data-tone="rain"]    { color: var(--rain); background: var(--rain-soft); }
 
-  /* scores */
-
   .score { display: flex; align-items: flex-start; gap: 4px; }
   .score b {
     font-size: 46px; font-weight: 200; line-height: .92;
@@ -627,8 +831,6 @@
     color: var(--ink);
   }
   .score span { font-size: 13px; font-weight: 700; color: var(--muted-2); margin-top: 7px; }
-
-  /* factors */
 
   .factors { list-style: none; display: flex; flex-direction: column; gap: 11px; margin-top: 16px; }
 
@@ -638,8 +840,6 @@
 
   .factor-bar { height: 4px; border-radius: 999px; background: var(--track); overflow: hidden; margin-top: 6px; }
   .factor-bar > span { display: block; height: 100%; width: 0; border-radius: 999px; transition: width .9s var(--ease), background .3s; }
-
-  /* crop */
 
   .crop-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
 
@@ -725,8 +925,6 @@
   .facts dt { font-size: 9.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--muted-2); }
   .facts dd { font-size: 14px; font-weight: 700; color: var(--ink); margin-top: 3px; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 
-  /* storm scale */
-
   .storm-scale {
     position: relative;
     height: 8px;
@@ -749,8 +947,6 @@
     font-size: 9px; font-weight: 800; letter-spacing: .08em;
     text-transform: uppercase; color: var(--muted-2);
   }
-
-  /* soil */
 
   .soil-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
 
@@ -777,8 +973,6 @@
     font-size: 11.5px; font-weight: 800; text-align: right;
     color: var(--ink-2); font-variant-numeric: tabular-nums;
   }
-
-  /* advice */
 
   .card--advice { display: flex; flex-direction: column; }
   .card--advice[data-level="ok"]   { background: linear-gradient(180deg, var(--ok-soft), var(--surface) 62%); }
@@ -809,8 +1003,6 @@
     transform: rotate(-45deg);
   }
 
-  /* ---------------- sections ---------------- */
-
   .section {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -829,8 +1021,6 @@
     font-size: 11px; font-weight: 800; letter-spacing: .16em;
     text-transform: uppercase; color: var(--muted);
   }
-
-  /* hourly */
 
   .hourly {
     display: flex; gap: 10px;
@@ -882,8 +1072,6 @@
     margin-top: 7px; font-variant-numeric: tabular-nums;
   }
 
-  /* daily */
-
   .day-row {
     display: grid;
     grid-template-columns: 132px minmax(0, 1fr) 92px 92px 62px;
@@ -916,8 +1104,6 @@
 
   .day-wind { font-size: 11.5px; font-weight: 600; color: var(--muted-2); text-align: right; font-variant-numeric: tabular-nums; }
 
-  /* footer */
-
   .foot {
     margin-top: 26px;
     padding-top: 18px;
@@ -928,8 +1114,6 @@
     line-height: 1.6;
   }
   .foot strong { color: var(--muted); font-weight: 700; }
-
-  /* ---------------- responsive ---------------- */
 
   @media (max-width: 1180px) {
     .card--crop   { grid-column: span 12; }
@@ -1034,7 +1218,6 @@
 <main class="shell" id="main">
   <div class="wrap">
 
-    <!-- LOADING -->
     <div id="loading" class="skeleton-grid" aria-hidden="true">
       <div class="sk-hero">
         <div class="sk"></div>
@@ -1048,7 +1231,6 @@
       </div>
     </div>
 
-    <!-- ERROR -->
     <div id="errorBox" class="error-card" hidden>
       <div class="error-icon">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -1062,7 +1244,6 @@
       <button class="btn btn--ghost" id="retryBtn" type="button">Retry</button>
     </div>
 
-    <!-- CONTENT -->
     <div id="content" hidden>
 
       <section class="loc-bar">
@@ -1377,10 +1558,6 @@
     daily:           $('dailyList')
   };
 
-  /* ------------------------------------------------------------------ */
-  /*  State                                                              */
-  /* ------------------------------------------------------------------ */
-
   var DEFAULT_LAT = 14.5995;
   var DEFAULT_LON = 120.9842;
 
@@ -1401,10 +1578,6 @@
 
   var REDUCED_MOTION = window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  /* ------------------------------------------------------------------ */
-  /*  Theme                                                              */
-  /* ------------------------------------------------------------------ */
 
   var ICON_SUN = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>';
   var ICON_MOON = '<path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/>';
@@ -1432,10 +1605,6 @@
   els.themeToggle.addEventListener('click', function () {
     applyTheme(els.html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
   });
-
-  /* ------------------------------------------------------------------ */
-  /*  Crops                                                              */
-  /* ------------------------------------------------------------------ */
 
   var CROPS = [
     { id: 'rice', name: 'Rice (Palay)', min: 15, optMin: 20, optMax: 35, max: 40,
@@ -1471,10 +1640,6 @@
     } catch (e) {}
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  Helpers                                                            */
-  /* ------------------------------------------------------------------ */
-
   var CARDINALS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
 
   function cardinal(deg) {
@@ -1486,7 +1651,7 @@
 
   function fmtCoord(v, isLat) {
     var dir = v >= 0 ? (isLat ? 'N' : 'E') : (isLat ? 'S' : 'W');
-    return Math.abs(v).toFixed(4) + '\u00B0 ' + dir;
+    return Math.abs(v).toFixed(4) + '\\u00B0 ' + dir;
   }
 
   function hourLabel(iso) {
@@ -1551,10 +1716,6 @@
     if (score >= 25) return 'var(--warn-2)';
     return 'var(--danger)';
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Wind particle layer                                                */
-  /* ------------------------------------------------------------------ */
 
   function WindParticleLayer(mapInstance) {
     this.map = mapInstance;
@@ -1677,10 +1838,6 @@
     }
   };
 
-  /* ------------------------------------------------------------------ */
-  /*  Map                                                                */
-  /* ------------------------------------------------------------------ */
-
   function initMap(lat, lon) {
     if (typeof L === 'undefined') return;
 
@@ -1746,11 +1903,7 @@
     }
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  Fetching — hybrid proxy/direct with automatic fallback             */
-  /* ------------------------------------------------------------------ */
-
-  var API_MODE = null;    // 'proxy' | 'direct'
+  var API_MODE = null;
   var API_PROBE = null;
 
   function detectApiMode() {
@@ -1879,10 +2032,6 @@
     });
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  Vegetation condition                                               */
-  /* ------------------------------------------------------------------ */
-
   function computeVegetation(data) {
     var h = data.hourly;
     var idx = findHourIndex(data);
@@ -1948,7 +2097,7 @@
       balance: balance,
       factors: [
         { name: 'Root-zone moisture', value: (rootMoisture * 100).toFixed(1) + ' %vol', score: Math.round(moistScore) },
-        { name: 'Soil temperature',   value: soilTemp.toFixed(1) + ' \u00B0C',           score: Math.round(tempScore) },
+        { name: 'Soil temperature',   value: soilTemp.toFixed(1) + ' \\u00B0C',           score: Math.round(tempScore) },
         { name: 'Water balance (24h)', value: (balance >= 0 ? '+' : '') + balance.toFixed(1) + ' mm', score: Math.round(balScore) },
         { name: 'Rain / ET (24h)',    value: rain24.toFixed(1) + ' / ' + et24.toFixed(1) + ' mm', score: Math.round(balScore) }
       ]
@@ -1974,10 +2123,6 @@
     }
     els.vegFactors.innerHTML = html;
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Soil profile                                                       */
-  /* ------------------------------------------------------------------ */
 
   function soilColor(v) {
     if (v < 0.10) return '#dc2626';
@@ -2029,17 +2174,13 @@
       html +=   '<div class="soil-track"><div class="soil-fill" style="width:' +
                 clamp((t + 5) / 50 * 100, 4, 100) +
                 '%;background:linear-gradient(90deg,#38bdf8,#fbbf24)"></div></div>';
-      html +=   '<div class="soil-value">' + t.toFixed(1) + '\u00B0</div>';
+      html +=   '<div class="soil-value">' + t.toFixed(1) + '\\u00B0</div>';
       html += '</div>';
     }
     html += '</div>';
 
     els.soilLayers.innerHTML = html;
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Crop suitability                                                   */
-  /* ------------------------------------------------------------------ */
 
   function evaluateCrop(cropId, stage, data) {
     var crop = CROP_MAP[cropId];
@@ -2071,26 +2212,26 @@
       var deficit = effMin - cur;
       status = deficit > 4 ? 'bad' : 'warn';
       message = '<strong>Below optimal range</strong> for ' + crop.name +
-                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \u00B0C is ' +
-                deficit.toFixed(1) + ' \u00B0C under the comfortable band.';
+                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \\u00B0C is ' +
+                deficit.toFixed(1) + ' \\u00B0C under the comfortable band.';
     } else if (cur > effMax) {
       var excess = cur - effMax;
       status = excess > 4 ? 'bad' : 'warn';
       message = '<strong>Above optimal range</strong> for ' + crop.name +
-                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \u00B0C is ' +
-                excess.toFixed(1) + ' \u00B0C over the comfortable band.';
+                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \\u00B0C is ' +
+                excess.toFixed(1) + ' \\u00B0C over the comfortable band.';
     } else {
       status = 'ok';
       message = '<strong>Within optimal range</strong> for ' + crop.name +
-                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \u00B0C is suitable.';
+                ' at ' + stage + ' stage. Current ' + cur.toFixed(1) + ' \\u00B0C is suitable.';
     }
 
     if (high7 > crop.max) {
-      message += ' Forecast high of ' + high7.toFixed(0) + ' \u00B0C exceeds the crop maximum of ' + crop.max + ' \u00B0C.';
+      message += ' Forecast high of ' + high7.toFixed(0) + ' \\u00B0C exceeds the crop maximum of ' + crop.max + ' \\u00B0C.';
       if (status === 'ok') status = 'warn';
     }
     if (low7 < crop.min) {
-      message += ' Forecast low of ' + low7.toFixed(0) + ' \u00B0C is below the crop minimum of ' + crop.min + ' \u00B0C.';
+      message += ' Forecast low of ' + low7.toFixed(0) + ' \\u00B0C is below the crop minimum of ' + crop.min + ' \\u00B0C.';
       if (status === 'ok') status = 'warn';
     }
 
@@ -2131,18 +2272,14 @@
         '#6ee7b7 ' + r.p2.toFixed(1) + '%,#6ee7b7 ' + r.p3.toFixed(1) + '%,' +
         '#fcd34d ' + r.p4.toFixed(1) + '%,#fca5a5 100%)';
 
-    els.cropMinLabel.textContent = r.crop.min + ' \u00B0C';
-    els.cropMaxLabel.textContent = r.crop.max + ' \u00B0C';
+    els.cropMinLabel.textContent = r.crop.min + ' \\u00B0C';
+    els.cropMaxLabel.textContent = r.crop.max + ' \\u00B0C';
 
-    els.cropCurrentTemp.textContent = r.current.toFixed(1) + ' \u00B0C';
-    els.cropHigh7.textContent = r.high7.toFixed(0) + ' \u00B0C';
-    els.cropLow7.textContent = r.low7.toFixed(0) + ' \u00B0C';
+    els.cropCurrentTemp.textContent = r.current.toFixed(1) + ' \\u00B0C';
+    els.cropHigh7.textContent = r.high7.toFixed(0) + ' \\u00B0C';
+    els.cropLow7.textContent = r.low7.toFixed(0) + ' \\u00B0C';
     els.cropSensitivity.textContent = r.sensLabel;
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Storm risk                                                         */
-  /* ------------------------------------------------------------------ */
 
   function computeStormRisk(data) {
     var cur = data.current;
@@ -2220,10 +2357,6 @@
     }
     els.stormFactors.innerHTML = html;
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Advisory                                                           */
-  /* ------------------------------------------------------------------ */
 
   function buildAdvice(data, risk, veg) {
     var cur = data.current;
@@ -2318,10 +2451,6 @@
     els.adviceText.innerHTML = html;
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  Current conditions                                                 */
-  /* ------------------------------------------------------------------ */
-
   function renderCurrent(data) {
     var cur = data.current;
     var idx = findHourIndex(data);
@@ -2329,10 +2458,10 @@
 
     els.nowCond.textContent = wmoText(cur.weather_code);
     els.tempNum.textContent = Math.round(cur.temperature_2m);
-    els.feelsLike.textContent = Math.round(cur.apparent_temperature) + '\u00B0C';
+    els.feelsLike.textContent = Math.round(cur.apparent_temperature) + '\\u00B0C';
 
-    els.todayHigh.textContent = Math.round(daily.temperature_2m_max[0]) + '\u00B0';
-    els.todayLow.textContent  = Math.round(daily.temperature_2m_min[0]) + '\u00B0';
+    els.todayHigh.textContent = Math.round(daily.temperature_2m_max[0]) + '\\u00B0';
+    els.todayLow.textContent  = Math.round(daily.temperature_2m_min[0]) + '\\u00B0';
     els.sunrise.textContent   = clock(daily.sunrise[0]);
     els.sunset.textContent    = clock(daily.sunset[0]);
 
@@ -2352,7 +2481,7 @@
     var dir = Math.round(cur.wind_direction_10m);
     els.windSpeed.textContent = Math.round(wind);
     els.windBar.style.width = clamp(wind / 60 * 100, 0, 100) + '%';
-    els.windSub.textContent = 'From ' + cardinal(dir) + ' (' + dir + '\u00B0) · gusts ' +
+    els.windSub.textContent = 'From ' + cardinal(dir) + ' (' + dir + '\\u00B0) · gusts ' +
                               Math.round(cur.wind_gusts_10m) + ' km/h';
 
     var pNow = cur.pressure_msl;
@@ -2367,16 +2496,12 @@
       ' · ' + (delta >= 0 ? '+' : '') + delta.toFixed(1) + ' hPa / 6h';
 
     els.roWind.textContent  = Math.round(wind) + ' km/h';
-    els.roDir.textContent   = cardinal(dir) + ' · ' + dir + '\u00B0';
+    els.roDir.textContent   = cardinal(dir) + ' · ' + dir + '\\u00B0';
     els.roGust.textContent  = Math.round(cur.wind_gusts_10m) + ' km/h';
     els.roPress.textContent = Math.round(pNow) + ' hPa';
 
     if (windLayer) windLayer.setWind(cur.wind_direction_10m, cur.wind_speed_10m);
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Hourly + daily                                                     */
-  /* ------------------------------------------------------------------ */
 
   function renderHourly(data) {
     var idx = findHourIndex(data);
@@ -2393,7 +2518,7 @@
 
       html += '<div class="hour-card' + (isNow ? ' is-now' : '') + '">';
       html +=   '<div class="hour-time">' + (isNow ? 'Now' : hourLabel(time)) + '</div>';
-      html +=   '<div class="hour-temp">' + temp + '\u00B0</div>';
+      html +=   '<div class="hour-temp">' + temp + '\\u00B0</div>';
       html +=   '<div class="hour-rain">';
       html +=     '<div class="bar"><span style="width:' + clamp(rain, 0, 100) + '%"></span></div>';
       html +=     '<span class="pct">' + rain + '%</span>';
@@ -2425,8 +2550,8 @@
       html +=   '<div class="day-name">' + dayLabel(d.time[i], i) +
                   '<span class="day-cond">' + wmoText(d.weather_code[i]) + '</span></div>';
       html +=   '<div class="day-range"><span style="left:' + left + '%;width:' + width + '%"></span></div>';
-      html +=   '<div class="day-temp"><span class="max">' + Math.round(tmax) + '\u00B0</span>' +
-                  '<span class="min">' + Math.round(tmin) + '\u00B0</span></div>';
+      html +=   '<div class="day-temp"><span class="max">' + Math.round(tmax) + '\\u00B0</span>' +
+                  '<span class="min">' + Math.round(tmin) + '\\u00B0</span></div>';
       html +=   '<div class="day-rain"><div class="bar"><span style="width:' +
                   clamp(rain, 0, 100) + '%"></span></div><span class="pct">' + rain + '%</span></div>';
       html +=   '<div class="day-wind">' + wind + ' km/h</div>';
@@ -2435,10 +2560,6 @@
 
     els.daily.innerHTML = html;
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Full render                                                        */
-  /* ------------------------------------------------------------------ */
 
   function renderAll(data) {
     renderCurrent(data);
@@ -2459,10 +2580,6 @@
       updateStormCircle(state.lat, state.lon, risk);
     }
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Load orchestration                                                 */
-  /* ------------------------------------------------------------------ */
 
   function setBusy(on) {
     state.busy = on;
@@ -2505,7 +2622,7 @@
       state.lat = lat;
       state.lon = lon;
 
-      els.locCoords.textContent = fmtCoord(lat, true) + ' \u00B7 ' + fmtCoord(lon, false);
+      els.locCoords.textContent = fmtCoord(lat, true) + ' \\u00B7 ' + fmtCoord(lon, false);
 
       if (!opts.keepLabel) {
         els.locName.textContent = opts.label || 'Your location';
@@ -2533,7 +2650,7 @@
           if (place.region) parts.push(place.region);
           if (place.country && place.country !== 'Philippines') parts.push(place.country);
 
-          els.locSub.textContent = parts.length ? parts.join(' \u00B7 ') : 'Philippines';
+          els.locSub.textContent = parts.length ? parts.join(' \\u00B7 ') : 'Philippines';
         });
       }
 
@@ -2563,13 +2680,9 @@
     els.gpsCoords.textContent = 'Manila (default)';
     load(DEFAULT_LAT, DEFAULT_LON, {
       label: 'Manila',
-      sub: 'Metro Manila \u00B7 Philippines'
+      sub: 'Metro Manila \\u00B7 Philippines'
     });
   }
-
-  /* ------------------------------------------------------------------ */
-  /*  Boot                                                               */
-  /* ------------------------------------------------------------------ */
 
   function boot() {
     initTheme();
@@ -2665,4 +2778,54 @@
 })();
 </script>
 </body>
-</html>
+</html>`;
+
+/* ------------------------------------------------------------------ */
+/*  Router                                                             */
+/* ------------------------------------------------------------------ */
+
+const server = http.createServer(async (req, res) => {
+  let u;
+  try {
+    u = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+  } catch (err) {
+    return sendJSON(res, 400, { error: 'Bad request' });
+  }
+
+  const path = u.pathname;
+
+  try {
+    if (path === '/' || path === '/index.html') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache'
+      });
+      return res.end(PAGE);
+    }
+
+    if (path === '/api/health') {
+      return sendJSON(res, 200, { ok: true, uptime: process.uptime() });
+    }
+
+    if (path === '/api/weather')  return handleWeather(u, res);
+    if (path === '/api/reverse')  return handleReverse(u, res);
+    if (path === '/api/ndvi')     return handleNdvi(u, res);
+
+    sendJSON(res, 404, { error: 'Not found' });
+  } catch (err) {
+    console.error('[AgriWeather] handler error:', err);
+    if (!res.headersSent) {
+      sendJSON(res, 500, { error: String(err.message || err) });
+    } else {
+      try { res.end(); } catch (e) {}
+    }
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/*  Boot                                                               */
+/* ------------------------------------------------------------------ */
+
+server.listen(PORT, () => {
+  console.log('[AgriWeather] Listening on http://localhost:' + PORT);
+});
