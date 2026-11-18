@@ -16,13 +16,6 @@
  *
  * Storm Watch is a heuristic risk indicator, not an official
  * typhoon forecast. Always follow PAGASA advisories.
- *
- * DIAGNOSTIC LAYER NOTICE
- * The firmware banner, error codes (ECE-0417, D000, FF, E-1041,
- * PWR-0229, SYS-0x8007), CPU temperature, voltage/current readouts
- * and the support chat are SIMULATED for presentation purposes.
- * No hardware is read and no update is ever applied. Set SIM.on
- * to false inside the page script to disable the whole layer.
  */
 
 'use strict';
@@ -259,13 +252,6 @@ const PAGE = `<!DOCTYPE html>
     --shadow-sm: 0 1px 2px rgba(15,23,42,.06);
     --shadow: 0 4px 16px rgba(15,23,42,.08);
     --map-filter: none;
-
-    --alarm: #dc2626;
-    --alarm-line: rgba(220,38,38,.55);
-    --amber: #b45309;
-    --term-bg: #0b1220;
-    --term-fg: #5eead4;
-    --term-dim: #7c8aa5;
   }
 
   html[data-theme="dark"] {
@@ -290,13 +276,6 @@ const PAGE = `<!DOCTYPE html>
     --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
     --shadow: 0 4px 16px rgba(0,0,0,.5);
     --map-filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.92);
-
-    --alarm: #ff453a;
-    --alarm-line: rgba(255,69,58,.55);
-    --amber: #fbbf24;
-    --term-bg: #05090f;
-    --term-fg: #5eead4;
-    --term-dim: #64748b;
   }
 
   html, body { height: 100%; }
@@ -1015,288 +994,6 @@ const PAGE = `<!DOCTYPE html>
     font-size: 13.5px; font-weight: 500; line-height: 1.6;
   }
 
-  /* ================================================================
-     SIMULATED DIAGNOSTIC LAYER
-     Cosmetic only. No hardware is read. Toggle with SIM.on.
-     ================================================================ */
-
-  .fw-banner {
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding: 10px 20px;
-    background: linear-gradient(90deg,
-      color-mix(in srgb, var(--alarm) 14%, var(--surface)),
-      var(--surface) 62%);
-    border-bottom: 1px solid var(--alarm-line);
-    font-size: 12px; font-weight: 600; color: var(--text);
-  }
-
-  .fw-dot {
-    width: 9px; height: 9px; border-radius: 50%;
-    background: var(--alarm); flex: 0 0 auto;
-    animation: fwblink 1.1s steps(2, end) infinite;
-  }
-  @keyframes fwblink { 50% { opacity: .12; } }
-
-  .fw-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-  .fw-text strong {
-    font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase;
-    color: var(--alarm);
-  }
-  .fw-ver { font-variant-numeric: tabular-nums; font-weight: 800; letter-spacing: .02em; }
-  .fw-sub { font-size: 10.5px; color: var(--muted); font-weight: 500; }
-
-  .fw-btn {
-    border: 1px solid var(--alarm-line); background: var(--alarm); color: #fff;
-    border-radius: 9px; padding: 8px 14px; font: inherit;
-    font-size: 11px; font-weight: 800; letter-spacing: .1em;
-    text-transform: uppercase; cursor: pointer;
-    transition: filter .2s, transform .15s;
-  }
-  .fw-btn:hover { filter: brightness(1.1); }
-  .fw-btn:active { transform: scale(.97); }
-  .fw-banner .fw-btn { margin-left: auto; }
-
-  .sys-chip {
-    font-size: 10px; font-weight: 800; letter-spacing: .14em;
-    padding: 7px 11px; border-radius: 999px;
-    border: 1px solid currentColor; color: var(--ok);
-    white-space: nowrap;
-  }
-  .sys-chip[data-state="warn"]  { color: var(--amber); }
-  .sys-chip[data-state="alarm"] { color: var(--alarm); animation: chipPulse 1.2s ease-in-out infinite; }
-  @keyframes chipPulse { 50% { opacity: .5; } }
-
-  .alert-stack {
-    position: fixed; right: 16px; bottom: 92px; z-index: 900;
-    display: flex; flex-direction: column; gap: 8px;
-    width: min(372px, calc(100vw - 32px));
-    pointer-events: none;
-  }
-
-  .alert {
-    pointer-events: auto;
-    display: flex; gap: 10px; align-items: flex-start;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 4px solid var(--alarm);
-    border-radius: 12px;
-    padding: 10px 12px;
-    box-shadow: 0 10px 28px rgba(2,6,23,.20);
-    animation: alertIn .3s cubic-bezier(.2,.9,.2,1);
-  }
-  .alert[data-sev="warn"] { border-left-color: var(--amber); }
-
-  @keyframes alertIn {
-    from { opacity: 0; transform: translateX(28px) scale(.96); }
-    to   { opacity: 1; transform: none; }
-  }
-
-  .alert-main { flex: 1; min-width: 0; }
-  .alert-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .alert-code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
-    color: #fff; background: var(--alarm);
-    border-radius: 5px; padding: 2px 6px;
-  }
-  .alert[data-sev="warn"] .alert-code { background: var(--amber); color: #1c1207; }
-  .alert-title {
-    font-size: 11.5px; font-weight: 800;
-    letter-spacing: .06em; text-transform: uppercase;
-  }
-  .alert-body {
-    font-size: 11.5px; color: var(--muted); line-height: 1.5;
-    margin-top: 4px; font-weight: 500;
-  }
-
-  .alert-x {
-    border: none; background: transparent; color: var(--muted);
-    cursor: pointer; font-size: 12px; line-height: 1; padding: 4px;
-    border-radius: 6px; flex: 0 0 auto;
-  }
-  .alert-x:hover { color: var(--text); background: var(--surface-2); }
-
-  .alarm-vignette {
-    position: fixed; inset: 0; z-index: 880; pointer-events: none;
-    opacity: 0; transition: opacity .3s;
-    background: radial-gradient(ellipse at center,
-      transparent 42%,
-      color-mix(in srgb, var(--alarm) 32%, transparent) 100%);
-  }
-  .alarm-vignette.on { opacity: 1; }
-
-  .sys-badge {
-    font-size: 10px; font-weight: 800; letter-spacing: .14em;
-    text-transform: uppercase; padding: 5px 11px;
-    border-radius: 999px; border: 1px solid currentColor;
-    color: var(--ok);
-  }
-  .sys-badge[data-state="warn"]  { color: var(--amber); }
-  .sys-badge[data-state="alarm"] { color: var(--alarm); }
-
-  .sys-row {
-    display: grid; grid-template-columns: 1fr auto;
-    gap: 4px 10px; align-items: center;
-    padding: 7px 0; border-bottom: 1px solid var(--border);
-  }
-  .sys-row:last-child { border-bottom: none; }
-  .sys-k { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .04em; }
-  .sys-v {
-    font-size: 13px; font-weight: 700; text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  .sys-v[data-alarm="1"] { color: var(--alarm); }
-  .sys-track {
-    grid-column: 1 / -1; height: 4px; border-radius: 999px;
-    background: var(--soil-track); overflow: hidden; margin-top: 2px;
-  }
-  .sys-track > span {
-    display: block; height: 100%; width: 0; border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent), var(--amber), var(--alarm));
-    transition: width .6s ease-out;
-  }
-
-  .term {
-    background: var(--term-bg); color: var(--term-fg);
-    border: 1px solid var(--border); border-radius: 12px;
-    padding: 12px 14px; height: 200px; overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 11px; line-height: 1.75; letter-spacing: .01em;
-    scrollbar-width: thin;
-  }
-  .term > div { white-space: pre-wrap; word-break: break-word; }
-  .term .t-dim  { color: var(--term-dim); }
-  .term .t-warn { color: #fbbf24; }
-  .term .t-err  { color: #ff6b6b; }
-
-  .fw-overlay {
-    position: fixed; inset: 0; z-index: 1000;
-    display: grid; place-items: center; padding: 20px;
-    background: color-mix(in srgb, #020617 62%, transparent);
-    backdrop-filter: blur(3px);
-  }
-  .fw-overlay[hidden] { display: none; }
-
-  .fw-modal {
-    width: min(460px, 100%);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    box-shadow: 0 30px 70px rgba(2,6,23,.45);
-    padding: 20px 22px;
-  }
-
-  .help-fab {
-    position: fixed; right: 18px; bottom: 18px; z-index: 950;
-    width: 56px; height: 56px; border-radius: 50%;
-    border: none; cursor: pointer; color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    display: grid; place-items: center;
-    box-shadow: 0 10px 26px rgba(15,118,110,.42);
-    transition: transform .18s, box-shadow .18s;
-  }
-  .help-fab:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(15,118,110,.5); }
-
-  .help-q {
-    font-size: 22px; font-weight: 600; line-height: 1;
-    letter-spacing: 0; transform: translateY(-1px);
-  }
-
-  .help-badge {
-    position: absolute; top: -2px; right: -2px;
-    min-width: 20px; height: 20px; padding: 0 5px;
-    border-radius: 999px; background: var(--alarm); color: #fff;
-    font-size: 11px; font-weight: 800;
-    display: grid; place-items: center;
-    border: 2px solid var(--surface);
-  }
-
-  .bot-panel {
-    position: fixed; right: 18px; bottom: 86px; z-index: 950;
-    width: min(344px, calc(100vw - 32px));
-    max-height: min(540px, calc(100vh - 150px));
-    display: flex; flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    box-shadow: 0 24px 60px rgba(2,6,23,.32);
-    overflow: hidden;
-    animation: botIn .24s cubic-bezier(.2,.9,.2,1);
-  }
-  .bot-panel[hidden] { display: none; }
-  @keyframes botIn {
-    from { opacity: 0; transform: translateY(14px) scale(.97); }
-    to   { opacity: 1; transform: none; }
-  }
-
-  .bot-head {
-    display: flex; align-items: center; gap: 10px;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-2);
-  }
-  .bot-avatar {
-    width: 34px; height: 34px; border-radius: 10px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .06em;
-    display: grid; place-items: center; flex: 0 0 auto;
-  }
-  .bot-name { font-size: 13px; font-weight: 800; letter-spacing: -.01em; }
-  .bot-status {
-    font-size: 10.5px; font-weight: 700; color: var(--ok);
-    display: flex; align-items: center; gap: 5px;
-  }
-  .bot-status::before {
-    content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor;
-  }
-
-  .bot-body {
-    flex: 1; overflow-y: auto; padding: 14px;
-    display: flex; flex-direction: column; gap: 10px;
-    background: var(--surface);
-  }
-
-  .msg {
-    max-width: 88%; padding: 9px 12px; border-radius: 14px;
-    font-size: 12.5px; line-height: 1.58; font-weight: 500;
-  }
-  .msg.bot {
-    align-self: flex-start; background: var(--surface-2);
-    border: 1px solid var(--border); border-bottom-left-radius: 4px;
-  }
-  .msg.user {
-    align-self: flex-end; background: var(--accent); color: #fff;
-    border-bottom-right-radius: 4px;
-  }
-
-  .typing {
-    align-self: flex-start; display: flex; gap: 4px;
-    padding: 11px 14px; border-radius: 14px;
-    background: var(--surface-2); border: 1px solid var(--border);
-  }
-  .typing span {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
-    animation: tdot 1.1s infinite;
-  }
-  .typing span:nth-child(2) { animation-delay: .15s; }
-  .typing span:nth-child(3) { animation-delay: .30s; }
-  @keyframes tdot {
-    0%, 60%, 100% { opacity: .3; transform: translateY(0); }
-    30%           { opacity: 1;  transform: translateY(-3px); }
-  }
-
-  .bot-quick {
-    display: flex; flex-wrap: wrap; gap: 8px;
-    padding: 0 14px 14px;
-  }
-  .quick-btn {
-    border: 1px solid var(--border); background: var(--surface-2);
-    color: var(--text); border-radius: 999px; padding: 7px 12px;
-    font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
-    transition: border-color .2s, color .2s;
-  }
-  .quick-btn:hover { border-color: var(--accent); color: var(--accent); }
-
   @media (max-width: 1000px) {
     .hero { grid-template-columns: 1fr; }
     .map-panel { min-height: 480px; }
@@ -1322,9 +1019,6 @@ const PAGE = `<!DOCTYPE html>
     .map-panel { min-height: 400px; }
     .map-legend { max-width: 200px; padding: 10px 12px; }
     .map-readout { padding: 10px 12px; min-width: 148px; }
-    .alert-stack { left: 10px; right: 10px; width: auto; }
-    .fw-banner { padding: 9px 14px; gap: 10px; }
-    .fw-banner .fw-btn { margin-left: 0; width: 100%; }
   }
 
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -1337,24 +1031,12 @@ const PAGE = `<!DOCTYPE html>
 </head>
 <body>
 
-<div class="fw-banner" id="fwBanner">
-  <span class="fw-dot"></span>
-  <div class="fw-text">
-    <strong>Firmware update available</strong>
-    <span class="fw-ver">v1.0.4_2.1.4</span>
-    <span class="fw-sub">Rollout staged for your region &middot; current build v1.0.4_2.1.3-rc7</span>
-  </div>
-  <button class="fw-btn" id="fwUpdateBtn" type="button">Update now</button>
-  <button class="alert-x" id="fwDismiss" type="button" aria-label="Dismiss">&#10005;</button>
-</div>
-
 <header class="topbar">
   <div class="brand">
     <span class="brand-name">AGRIWEATHER</span>
     <span class="brand-sub">Philippine Farm Forecast</span>
   </div>
   <div class="topbar-right">
-    <div class="sys-chip" id="sysChip" data-state="ok">SYS OK</div>
     <div class="gps-badge">
       <span class="dot"></span>
       <span class="coords" id="gpsCoords">Acquiring GPS signal</span>
@@ -1432,35 +1114,6 @@ const PAGE = `<!DOCTYPE html>
             <div class="card-kicker">Wind Direction</div>
             <div class="mini-value" id="windDirCard">--</div>
             <div class="mini-sub" id="windDirSub">--</div>
-          </div>
-        </div>
-
-        <div class="veg-card">
-          <div class="soil-head">
-            <div class="soil-title">System Health</div>
-            <div class="sys-badge" id="sysState" data-state="ok">Nominal</div>
-          </div>
-
-          <div class="sys-row">
-            <span class="sys-k">ECE containment</span>
-            <span class="sys-v" id="sysEce">Standby</span>
-          </div>
-          <div class="sys-row">
-            <span class="sys-k">Main power</span>
-            <span class="sys-v" id="sysPower">220.4 V &middot; 3.05 A</span>
-          </div>
-          <div class="sys-row">
-            <span class="sys-k">CPU core temperature</span>
-            <span class="sys-v" id="sysCpu">44.2 &deg;C</span>
-            <div class="sys-track"><span id="sysCpuBar"></span></div>
-          </div>
-          <div class="sys-row">
-            <span class="sys-k">Fault counter</span>
-            <span class="sys-v" id="sysFaults">0</span>
-          </div>
-          <div class="sys-row">
-            <span class="sys-k">Firmware</span>
-            <span class="sys-v" id="sysFw">v1.0.4_2.1.3-rc7</span>
           </div>
         </div>
 
@@ -1579,62 +1232,8 @@ const PAGE = `<!DOCTYPE html>
       <div class="daily" id="dailyList"></div>
     </section>
 
-    <section class="section" style="margin-top:20px">
-      <div class="section-title">Diagnostic Console &mdash; Live</div>
-      <div class="term" id="termLog"></div>
-    </section>
-
   </div>
 </main>
-
-<div class="alarm-vignette" id="alarmVignette"></div>
-<div class="alert-stack" id="alertStack" aria-live="polite"></div>
-
-<div class="fw-overlay" id="fwOverlay" hidden>
-  <div class="fw-modal">
-    <div class="fw-text" style="gap:4px">
-      <strong style="color:var(--alarm);font-size:10.5px;letter-spacing:.16em;">
-        System firmware update
-      </strong>
-      <div class="fw-ver" style="font-size:20px;">v1.0.4_2.1.4</div>
-      <div class="fw-sub">Do not power off the unit during the rollout.</div>
-    </div>
-
-    <div style="height:8px;border-radius:999px;background:var(--soil-track);overflow:hidden;margin:16px 0 12px;">
-      <div id="fwBar" style="height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .35s ease-out;"></div>
-    </div>
-
-    <div class="term" id="fwLog" style="height:150px;"></div>
-
-    <div style="display:flex;gap:8px;margin-top:14px;">
-      <button class="fw-btn" id="fwRetry" type="button">Retry update</button>
-      <button class="quick-btn" id="fwClose" type="button">Close</button>
-    </div>
-  </div>
-</div>
-
-<button class="help-fab" id="helpFab" type="button" aria-label="Customer service" aria-expanded="false">
-  <span class="help-q">?</span>
-  <span class="help-badge" id="helpBadge">1</span>
-</button>
-
-<div class="bot-panel" id="botPanel" hidden>
-  <div class="bot-head">
-    <div class="bot-avatar">DHL</div>
-    <div style="flex:1;min-width:0;">
-      <div class="bot-name">DHL Customer Service</div>
-      <div class="bot-status">Online</div>
-    </div>
-    <button class="alert-x" id="botClose" type="button" aria-label="Close">&#10005;</button>
-  </div>
-  <div class="bot-body" id="botBody"></div>
-  <div class="bot-quick">
-    <button class="quick-btn" data-q="firmware" type="button">Firmware status</button>
-    <button class="quick-btn" data-q="power" type="button">Power fault</button>
-    <button class="quick-btn" data-q="cpu" type="button">CPU temperature</button>
-    <button class="quick-btn" data-q="tech" type="button">Technician line</button>
-  </div>
-</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -2633,559 +2232,65 @@ const PAGE = `<!DOCTYPE html>
           var parts = [];
           if (place.region) parts.push(place.region);
           if (place.country && place.country !== 'Philippines') parts.push(place.country);
-          if (weather.timezone) parts.push(String(weather.timezone).replace(/_/g, ' '));
-          els.locSub.textContent = parts.filter(Boolean).join(' \u00B7 ');
+
+          els.locSub.textContent = parts.length
+            ? parts.join(' \u00B7 ')
+            : (fmtCoord(lat, true) + ' \u00B7 ' + fmtCoord(lon, false));
         });
       }
     }).catch(function (err) {
       els.loading.style.display = 'none';
+      els.content.style.display = 'none';
       els.error.style.display = 'block';
-      els.error.textContent =
-        'Unable to load weather data: ' + (err.message || 'Unknown error') +
+      els.error.textContent = 'Could not load weather data' +
+        (err && err.message ? ' (' + err.message + ')' : '') +
         '. Please check your connection and refresh the page.';
     });
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  GPS bootstrap                                                      */
-  /* ------------------------------------------------------------------ */
+  function loadDefault() {
+    loadAll(DEFAULT_LAT, DEFAULT_LON, 'Manila', 'Metro Manila \u00B7 Philippines');
+  }
 
-  function start() {
-    var saved = null;
-    try { saved = JSON.parse(localStorage.getItem('agriweather.pos') || 'null'); } catch (e) { saved = null; }
+  function boot() {
+    initTheme();
+    populateCrops();
+
+    els.cropSelect.addEventListener('change', function () {
+      if (currentData) renderCrop(currentData);
+    });
+    els.stageSelect.addEventListener('change', function () {
+      if (currentData) renderCrop(currentData);
+    });
 
     if (!navigator.geolocation) {
-      loadAll(DEFAULT_LAT, DEFAULT_LON, 'Manila', 'Metro Manila, Philippines');
+      loadDefault();
       return;
     }
 
-    els.loading.style.display = 'grid';
     els.gpsCoords.textContent = 'Acquiring GPS signal';
-
-    var resolved = false;
-
-    var timeout = setTimeout(function () {
-      if (resolved) return;
-      resolved = true;
-      loadAll(DEFAULT_LAT, DEFAULT_LON, 'Manila', 'Metro Manila, Philippines');
-    }, 9000);
 
     navigator.geolocation.getCurrentPosition(
       function (pos) {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timeout);
-
-        var la = pos.coords.latitude;
-        var lo = pos.coords.longitude;
-        var acc = Math.round(pos.coords.accuracy);
-        loadAll(la, lo, null, 'GPS accuracy \u00B1' + acc + ' m');
+        loadAll(pos.coords.latitude, pos.coords.longitude);
       },
       function () {
-        if (resolved) return;
-        resolved = true;
-        clearTimeout(timeout);
-
-        if (saved && typeof saved.lat === 'number' && typeof saved.lon === 'number') {
-          loadAll(saved.lat, saved.lon, 'Last known location', 'GPS unavailable \u00B7 using last saved position');
-        } else {
-          loadAll(DEFAULT_LAT, DEFAULT_LON, 'Manila', 'Metro Manila, Philippines \u00B7 GPS unavailable');
-        }
+        loadDefault();
       },
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
   }
 
-  /* ------------------------------------------------------------------ */
-  /*  Crop change handlers                                               */
-  /* ------------------------------------------------------------------ */
-
-  els.cropSelect.addEventListener('change', function () {
-    if (currentData) renderCrop(currentData);
-  });
-
-  els.stageSelect.addEventListener('change', function () {
-    if (currentData) renderCrop(currentData);
-  });
-
-  /* ------------------------------------------------------------------ */
-  /*  Auto-refresh every 10 minutes                                      */
-  /* ------------------------------------------------------------------ */
-
-  setInterval(function () {
-    if (!currentPos) return;
-    fetchWeather(currentPos.lat, currentPos.lon).then(function (data) {
-      currentData = data;
-      renderAll(data);
-    }).catch(function () {});
-  }, 10 * 60 * 1000);
-
-  /* ------------------------------------------------------------------ */
-  /*  Responsive redraw                                                  */
-  /* ------------------------------------------------------------------ */
-
-  var resizeTimer = null;
-  window.addEventListener('resize', function () {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(function () {
-      if (windLayer) windLayer.resize();
-    }, 160);
-  });
-
-  /* ================================================================== */
-  /*  SIMULATED DIAGNOSTIC LAYER                                        */
-  /*  Every value below is generated in the browser. Nothing here reads */
-  /*  hardware, contacts a server, or applies an update.                */
-  /* ================================================================== */
-
-  var SIM = {
-    on: true,
-    cpuTemp: 44.2,
-    voltage: 220.4,
-    current: 3.05,
-    faults: 0,
-    ece: false,
-    chip: 'ok'
-  };
-
-  var SIM_FW = {
-    current: 'v1.0.4_2.1.3-rc7',
-    target: 'v1.0.4_2.1.4'
-  };
-
-  var ALERT_EVENTS = [
-    {
-      code: 'ECE-0417',
-      sev: 'alarm',
-      title: 'ECE containment activated',
-      body: 'Unregulated power event detected on the auxiliary rail. Containment relay engaged. Verify the supply before resuming field operations.'
-    },
-    {
-      code: 'D000',
-      sev: 'warn',
-      title: 'CPU thermal threshold',
-      body: 'Core temperature is trending above the nominal envelope. Code D000 is raised when the enclosure exceeds the diagnostic limit. Reduce load or improve ventilation.'
-    },
-    {
-      code: 'FF',
-      sev: 'alarm',
-      title: 'Power rail trip',
-      body: 'Main rail trip registered. An automatic reclose has been attempted. If the trip repeats within the hour, isolate the unit and call the technician line.'
-    },
-    {
-      code: 'E-1041',
-      sev: 'warn',
-      title: 'Sensor bus timeout',
-      body: 'The soil probe array did not answer within 400 ms. Values displayed may be interpolated until the bus recovers.'
-    },
-    {
-      code: 'SYS-0x8007',
-      sev: 'warn',
-      title: 'Firmware rollback pending',
-      body: 'A rollback image is staged. The current build is running under a degraded compatibility profile.'
-    },
-    {
-      code: 'PWR-0229',
-      sev: 'warn',
-      title: 'Unregulated input',
-      body: 'Input voltage is outside the regulation band. Surge protection remains armed and no action is required yet.'
-    }
-  ];
-
-  var BOT_GREETING =
-    'Hello. Welcome to DHL Customer Service. Your issue regarding the firmware rollout ' +
-    'has been established for your region so that our machine learning models and ' +
-    'sensor integration can operate normally. Please contact an emergency technician ' +
-    'at line 10641 for immediate assistance.';
-
-  var BOT_REPLIES = {
-    firmware: 'Firmware v1.0.4_2.1.4 is staged for your region. The update may stop at the verification step with code 0x8007 while the region profile synchronises. This is expected and is not a hardware failure.',
-    power: 'The most recent power event was logged as FF, a main rail trip. An automatic reclose has been attempted. If the code repeats within the hour, isolate the unit and call the technician line.',
-    cpu: 'The CPU is operating inside its thermal envelope at this time. Code D000 is raised when the enclosure temperature rises above the diagnostic threshold.',
-    tech: 'Emergency technician line: 10641. Please have the unit serial number and the latest error code ready when you call.'
-  };
-
-  var vignetteTimer = null;
-  var botStarted = false;
-
-  function setChip(state) {
-    SIM.chip = state;
-
-    var chip = $('sysChip');
-    if (chip) {
-      chip.setAttribute('data-state', state);
-      chip.textContent = state === 'alarm' ? 'SYS ALARM' : state === 'warn' ? 'SYS WARN' : 'SYS OK';
-    }
-
-    var badge = $('sysState');
-    if (badge) {
-      badge.setAttribute('data-state', state);
-      badge.textContent = state === 'alarm' ? 'Alarm' : state === 'warn' ? 'Degraded' : 'Nominal';
-    }
-  }
-
-  function updateHealthUI() {
-    var cpu = $('sysCpu');
-    var bar = $('sysCpuBar');
-    var pwr = $('sysPower');
-    var ece = $('sysEce');
-    var flt = $('sysFaults');
-    var fw  = $('sysFw');
-
-    if (cpu) {
-      cpu.textContent = SIM.cpuTemp.toFixed(1) + ' \u00B0C';
-      cpu.setAttribute('data-alarm', SIM.cpuTemp >= 78 ? '1' : '0');
-    }
-    if (bar) {
-      bar.style.width = clamp((SIM.cpuTemp - 30) / 70 * 100, 2, 100) + '%';
-    }
-    if (pwr) {
-      pwr.textContent = SIM.voltage.toFixed(1) + ' V \u00B7 ' + SIM.current.toFixed(2) + ' A';
-    }
-    if (flt) flt.textContent = String(SIM.faults);
-    if (fw) fw.textContent = SIM_FW.current;
-    if (ece) ece.textContent = SIM.ece ? 'Activated' : 'Standby';
-  }
-
-  function termLog(text, cls) {
-    var t = $('termLog');
-    if (!t) return;
-
-    var d = new Date();
-    var ts =
-      ('0' + d.getHours()).slice(-2) + ':' +
-      ('0' + d.getMinutes()).slice(-2) + ':' +
-      ('0' + d.getSeconds()).slice(-2);
-
-    var line = document.createElement('div');
-    if (cls) line.className = 't-' + cls;
-    line.textContent = '[' + ts + '] ' + text;
-
-    t.appendChild(line);
-    while (t.children.length > 140) t.removeChild(t.firstChild);
-    t.scrollTop = t.scrollHeight;
-  }
-
-  function pushAlert(ev) {
-    var stack = $('alertStack');
-    if (!stack) return;
-
-    var card = document.createElement('div');
-    card.className = 'alert';
-    card.setAttribute('data-sev', ev.sev === 'alarm' ? 'alarm' : 'warn');
-
-    var main = document.createElement('div');
-    main.className = 'alert-main';
-
-    var head = document.createElement('div');
-    head.className = 'alert-head';
-
-    var code = document.createElement('span');
-    code.className = 'alert-code';
-    code.textContent = ev.code;
-
-    var title = document.createElement('span');
-    title.className = 'alert-title';
-    title.textContent = ev.title;
-
-    head.appendChild(code);
-    head.appendChild(title);
-
-    var body = document.createElement('div');
-    body.className = 'alert-body';
-    body.textContent = ev.body;
-
-    main.appendChild(head);
-    main.appendChild(body);
-
-    var close = document.createElement('button');
-    close.className = 'alert-x';
-    close.type = 'button';
-    close.setAttribute('aria-label', 'Dismiss');
-    close.textContent = '\u00D7';
-    close.addEventListener('click', function () {
-      if (card.parentNode) card.parentNode.removeChild(card);
-    });
-
-    card.appendChild(main);
-    card.appendChild(close);
-    stack.appendChild(card);
-
-    while (stack.children.length > 3) stack.removeChild(stack.firstChild);
-
-    var life = ev.sev === 'alarm' ? 22000 : 14000;
-    setTimeout(function () {
-      if (card.parentNode) card.parentNode.removeChild(card);
-    }, life);
-  }
-
-  function flashVignette() {
-    var v = $('alarmVignette');
-    if (!v) return;
-    v.classList.add('on');
-    clearTimeout(vignetteTimer);
-    vignetteTimer = setTimeout(function () { v.classList.remove('on'); }, 1300);
-  }
-
-  function fireEvent(ev) {
-    SIM.faults++;
-    termLog('WARN  ' + ev.code + '  ' + ev.title.toUpperCase(), ev.sev === 'alarm' ? 'err' : 'warn');
-
-    if (ev.code === 'D000') {
-      SIM.cpuTemp = clamp(SIM.cpuTemp + 22, 41, 99);
-      setChip('alarm');
-    } else if (ev.code === 'FF') {
-      setChip('alarm');
-      flashVignette();
-    } else if (ev.code === 'ECE-0417') {
-      SIM.ece = true;
-      setChip('alarm');
-      flashVignette();
-    } else if (SIM.chip === 'ok') {
-      setChip('warn');
-    }
-
-    updateHealthUI();
-    pushAlert(ev);
-
-    if (SIM.chip === 'alarm') {
-      setTimeout(function () {
-        if (SIM.chip === 'alarm' && Math.random() > 0.45) setChip('warn');
-      }, 6000);
-    }
-  }
-
-  function diagTick() {
-    if (!SIM.on) return;
-
-    SIM.cpuTemp = clamp(SIM.cpuTemp + (Math.random() * 3 - 1.5), 41, 74);
-    SIM.voltage = clamp(SIM.voltage + (Math.random() * 3 - 1.5), 212, 238);
-    SIM.current = clamp(SIM.current + (Math.random() * 0.3 - 0.15), 2.3, 4.6);
-
-    var ev = ALERT_EVENTS[Math.floor(Math.random() * ALERT_EVENTS.length)];
-    fireEvent(ev);
-  }
-
-  function scheduleDiag() {
-    setTimeout(function () {
-      if (!SIM.on) return;
-      diagTick();
-      scheduleDiag();
-    }, 9000 + Math.random() * 7000);
-  }
-
-  /* ---- firmware update dialog (always ends in 0x8007) ---- */
-
-  function startFirmwareUpdate() {
-    var bar = $('fwBar');
-    var log = $('fwLog');
-    if (!bar || !log) return;
-
-    bar.style.width = '0%';
-    log.innerHTML = '';
-
-    var steps = [
-      { t: 'Contacting update server ................ ok',  c: 'dim',  p: 8  },
-      { t: 'Region profile matched: AP-SOUTHEAST',         c: 'dim',  p: 18 },
-      { t: 'Downloading ' + SIM_FW.target + ' (48.2 MB) ... ok', c: 'dim', p: 40 },
-      { t: 'Verifying signature ................... ok',   c: 'dim',  p: 52 },
-      { t: 'Writing slot B ........................ 68%',  c: 'warn', p: 68 },
-      { t: 'Checksum mismatch 0x8007',                     c: 'err',  p: 68 },
-      { t: 'Rollout aborted. Unit remains on ' + SIM_FW.current + '.', c: 'err', p: 68 },
-      { t: 'Retry is safe. No data loss detected.',        c: 'dim',  p: 68 }
-    ];
-
-    var i = 0;
-    function step() {
-      if (i >= steps.length) return;
-      var s = steps[i];
-
-      var line = document.createElement('div');
-      line.className = 't-' + s.c;
-      line.textContent = s.t;
-      log.appendChild(line);
-      log.scrollTop = log.scrollHeight;
-
-      bar.style.width = s.p + '%';
-      i++;
-      setTimeout(step, 420 + Math.random() * 380);
-    }
-    step();
-  }
-
-  /* ---- support bot ---- */
-
-  function botSay(text) {
-    var body = $('botBody');
-    if (!body) return;
-
-    var typing = document.createElement('div');
-    typing.className = 'typing';
-    typing.innerHTML = '<span></span><span></span><span></span>';
-    body.appendChild(typing);
-    body.scrollTop = body.scrollHeight;
-
-    setTimeout(function () {
-      if (typing.parentNode) typing.parentNode.removeChild(typing);
-
-      var msg = document.createElement('div');
-      msg.className = 'msg bot';
-      msg.textContent = text;
-      body.appendChild(msg);
-      body.scrollTop = body.scrollHeight;
-    }, 850);
-  }
-
-  function botAsk(label, reply) {
-    var body = $('botBody');
-    if (!body) return;
-
-    var msg = document.createElement('div');
-    msg.className = 'msg user';
-    msg.textContent = label;
-    body.appendChild(msg);
-    body.scrollTop = body.scrollHeight;
-
-    botSay(reply);
-  }
-
-  function openBot() {
-    var panel = $('botPanel');
-    if (!panel) return;
-
-    panel.hidden = false;
-    var fab = $('helpFab');
-    if (fab) fab.setAttribute('aria-expanded', 'true');
-
-    var badge = $('helpBadge');
-    if (badge) badge.style.display = 'none';
-
-    if (!botStarted) {
-      botStarted = true;
-      botSay(BOT_GREETING);
-    }
-  }
-
-  function closeBot() {
-    var panel = $('botPanel');
-    if (!panel) return;
-    panel.hidden = true;
-    var fab = $('helpFab');
-    if (fab) fab.setAttribute('aria-expanded', 'false');
-  }
-
-  /* ---- wiring ---- */
-
-  function initExtras() {
-    var banner = $('fwBanner');
-    var dismiss = $('fwDismiss');
-    var updateBtn = $('fwUpdateBtn');
-    var overlay = $('fwOverlay');
-    var fwClose = $('fwClose');
-    var fwRetry = $('fwRetry');
-
-    if (dismiss && banner) {
-      dismiss.addEventListener('click', function () { banner.style.display = 'none'; });
-    }
-
-    if (updateBtn) {
-      updateBtn.addEventListener('click', function () {
-        if (!overlay) return;
-        overlay.hidden = false;
-        startFirmwareUpdate();
-      });
-    }
-
-    if (fwClose && overlay) {
-      fwClose.addEventListener('click', function () { overlay.hidden = true; });
-    }
-
-    if (fwRetry) {
-      fwRetry.addEventListener('click', function () { startFirmwareUpdate(); });
-    }
-
-    var fab = $('helpFab');
-    if (fab) {
-      fab.addEventListener('click', function () {
-        var panel = $('botPanel');
-        if (!panel) return;
-        if (panel.hidden) openBot(); else closeBot();
-      });
-    }
-
-    var botClose = $('botClose');
-    if (botClose) botClose.addEventListener('click', closeBot);
-
-    var quick = document.querySelector('.bot-quick');
-    if (quick) {
-      quick.addEventListener('click', function (e) {
-        var btn = e.target.closest ? e.target.closest('.quick-btn') : null;
-        if (!btn) return;
-        var key = btn.getAttribute('data-q');
-        var reply = BOT_REPLIES[key];
-        if (!reply) return;
-        botAsk(btn.textContent, reply);
-      });
-    }
-
-    if (!SIM.on) {
-      setChip('ok');
-      return;
-    }
-
-    updateHealthUI();
-    termLog('diagnostic channel opened', 'dim');
-    termLog('running firmware ' + SIM_FW.current, 'dim');
-    termLog('update ' + SIM_FW.target + ' available for this region', 'warn');
-
-    scheduleDiag();
-
-    setInterval(function () {
-      if (!SIM.on) return;
-      var lines = [
-        'telemetry heartbeat: nominal',
-        'sensor bus: 4/4 probes responding',
-        'soil feed packet accepted',
-        'power rail within regulation band',
-        'ml model sync: region profile cached'
-      ];
-      termLog(lines[Math.floor(Math.random() * lines.length)], 'dim');
-    }, 5600);
-  }
-
-  /* ------------------------------------------------------------------ */
-  /*  Boot                                                               */
-  /* ------------------------------------------------------------------ */
-
-  populateCrops();
-  initTheme();
-  initExtras();
-  start();
-
+  boot();
 })();
 </script>
 </body>
 </html>`;
 
 app.get('/', (_req, res) => {
-  res.set('Content-Type', 'text/html; charset=utf-8');
-  res.set('Cache-Control', 'no-cache');
-  res.send(PAGE);
-});
-
-app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
-
-app.use((err, _req, res, _next) => {
-  console.error('[AgriWeather]', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.type('html').send(PAGE);
 });
 
 app.listen(PORT, () => {
-  console.log('');
-  console.log('  ┌────────────────────────────────────────────┐');
-  console.log('  │  AGRIWEATHER                               │');
-  console.log('  │  Philippine Farm Forecast                  │');
-  console.log('  │  http://localhost:' + String(PORT).padEnd(25) + '│');
-  console.log('  └────────────────────────────────────────────┘');
-  console.log('');
+  console.log('[AgriWeather] Listening on http://localhost:' + PORT);
 });
