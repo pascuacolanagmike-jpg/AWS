@@ -1,926 +1,624 @@
 'use strict';
 
 /**
- * 💖 BARBIE SERVER 💖
- * Pure Barbie vibes. No weather. No farm. Just chaos and glitter.
+ * AGRIWEATHER — Philippine Farm Forecast
+ * Zero-dependency Node.js server (built-in http + fetch).
  *
  *   node server.js
  *   -> http://localhost:3000
  *
- * come on barbie, let's go party 🪩
+ * External services (all free, no key):
+ *   - Open-Meteo          weather + soil data
+ *   - Nominatim           reverse geocoding
+ *   - OpenStreetMap       map tiles
+ *
+ * Storm Watch is a heuristic risk indicator, not an official typhoon
+ * forecast. Always follow PAGASA advisories.
  */
 
 const http = require('http');
+const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
 
+if (typeof fetch !== 'function') {
+  console.error('[AgriWeather] Node.js 18+ is required (global fetch missing). You are on ' + process.version);
+  process.exit(1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  In-memory cache                                                    */
+/* ------------------------------------------------------------------ */
+
+const CACHE = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+async function getJSON(url, extraHeaders = {}, timeoutMs = 6000) {
+  const hit = CACHE.get(url);
+  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.data;
+
+  const headers = {
+    'Accept': 'application/json',
+    'User-Agent': 'AgriWeather/1.0 (Philippine farm forecast)',
+    ...extraHeaders
+  };
+
+  const opts = { headers };
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    opts.signal = AbortSignal.timeout(timeoutMs);
+  }
+
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error('Upstream responded with ' + res.status);
+
+  const data = await res.json();
+  CACHE.set(url, { at: Date.now(), data });
+  if (CACHE.size > 250) CACHE.delete(CACHE.keys().next().value);
+  return data;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Response helper                                                    */
+/* ------------------------------------------------------------------ */
+
+function sendJSON(res, status, body, cacheSeconds) {
+  if (res.headersSent) return;
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': cacheSeconds ? 'public, max-age=' + cacheSeconds : 'no-store',
+    'Access-Control-Allow-Origin': '*'
+  });
+  res.end(JSON.stringify(body));
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: reverse geocode                                               */
+/* ------------------------------------------------------------------ */
+
+async function handleReverse(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return sendJSON(res, 400, { error: 'lat and lon are required' });
+  }
+
+  try {
+    const url =
+      'https://nominatim.openstreetmap.org/reverse?format=json&zoom=12&accept-language=en' +
+      '&lat=' + lat + '&lon=' + lon;
+
+    const data = await getJSON(url, {}, 5000);
+    const a = (data && data.address) || {};
+
+    const name =
+      a.city || a.town || a.village || a.municipality ||
+      a.county || a.state_district || a.state || 'Your location';
+
+    sendJSON(res, 200, {
+      name: name,
+      region: a.state || a.region || '',
+      country: a.country || ''
+    }, 3600);
+  } catch (err) {
+    sendJSON(res, 200, {
+      name: 'Your location', region: '', country: '',
+      error: String(err.message || err)
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: weather forecast                                              */
+/* ------------------------------------------------------------------ */
+
+async function handleWeather(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (
+    !Number.isFinite(lat) || !Number.isFinite(lon) ||
+    Math.abs(lat) > 90 || Math.abs(lon) > 180
+  ) {
+    return sendJSON(res, 400, { error: 'Valid lat and lon are required' });
+  }
+
+  const params = new URLSearchParams({
+    latitude: String(lat),
+    longitude: String(lon),
+    current: [
+      'temperature_2m',
+      'relative_humidity_2m',
+      'apparent_temperature',
+      'is_day',
+      'weather_code',
+      'pressure_msl',
+      'wind_speed_10m',
+      'wind_direction_10m',
+      'wind_gusts_10m',
+      'precipitation'
+    ].join(','),
+    hourly: [
+      'temperature_2m',
+      'relative_humidity_2m',
+      'precipitation_probability',
+      'precipitation',
+      'pressure_msl',
+      'wind_speed_10m',
+      'wind_direction_10m',
+      'wind_gusts_10m',
+      'soil_moisture_0_to_1cm',
+      'soil_moisture_1_to_3cm',
+      'soil_moisture_3_to_9cm',
+      'soil_moisture_9_to_27cm',
+      'soil_temperature_0cm',
+      'soil_temperature_6cm',
+      'soil_temperature_18cm',
+      'soil_temperature_54cm',
+      'evapotranspiration'
+    ].join(','),
+    daily: [
+      'weather_code',
+      'temperature_2m_max',
+      'temperature_2m_min',
+      'precipitation_sum',
+      'precipitation_probability_max',
+      'wind_speed_10m_max',
+      'wind_gusts_10m_max',
+      'et0_fao_evapotranspiration',
+      'sunrise',
+      'sunset'
+    ].join(','),
+    timezone: 'auto',
+    forecast_days: '7'
+  });
+
+  try {
+    const data = await getJSON('https://api.open-meteo.com/v1/forecast?' + params.toString());
+    sendJSON(res, 200, data, 300);
+  } catch (err) {
+    sendJSON(res, 502, { error: String(err.message || err) });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  API: vegetation conditions (soil feed)                             */
+/* ------------------------------------------------------------------ */
+
+async function handleNdvi(u, res) {
+  const lat = parseFloat(u.searchParams.get('lat'));
+  const lon = parseFloat(u.searchParams.get('lon'));
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return sendJSON(res, 400, { error: 'lat and lon are required' });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      latitude: String(lat),
+      longitude: String(lon),
+      hourly: [
+        'soil_moisture_0_to_1cm',
+        'soil_moisture_1_to_3cm',
+        'soil_moisture_3_to_9cm',
+        'soil_moisture_9_to_27cm',
+        'soil_temperature_6cm',
+        'soil_temperature_18cm',
+        'evapotranspiration'
+      ].join(','),
+      daily: 'et0_fao_evapotranspiration,precipitation_sum',
+      timezone: 'auto',
+      forecast_days: '3'
+    });
+
+    const data = await getJSON('https://api.open-meteo.com/v1/forecast?' + params.toString());
+    sendJSON(res, 200, { source: 'soil-feed', data }, 1800);
+  } catch (err) {
+    sendJSON(res, 502, { error: String(err.message || err) });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  The UI                                                             */
+/* ------------------------------------------------------------------ */
+
 const PAGE = `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>💖 barbie 💖</title>
-<meta name="theme-color" content="#ff2d95">
-<meta name="description" content="hi barbie 💖">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Bungee&family=Fredoka:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>AgriWeather — Philippine Farm Forecast</title>
+<meta name="theme-color" content="#0d9488" />
+<meta name="description" content="Free weather, soil and crop-suitability forecast for Philippine farms. No API keys, no tracking." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   *, *::before, *::after { box-sizing: border-box; }
   * { margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
 
   :root {
-    --pink: #ff2d95;
-    --pink-2: #ff7ac8;
-    --pink-3: #ffc2e6;
-    --lavender: #b388ff;
-    --ink: #3d0b2e;
-    --white: #ffffff;
+    --bg: #f3f6fa;
+    --surface: #ffffff;
+    --surface-2: #f7f9fc;
+    --surface-3: #eef2f8;
+    --border: #e4e9f1;
+    --border-2: #cfd8e6;
+    --ink: #0b1220;
+    --ink-2: #1e293b;
+    --muted: #5b6b83;
+    --muted-2: #8c9bb2;
+    --brand: #0d9488;
+    --brand-2: #14b8a6;
+    --brand-ink: #0f766e;
+    --brand-soft: #e5f7f4;
+    --rain: #0284c7;
+    --rain-soft: #e0f2fe;
+    --warn: #d97706;
+    --warn-2: #ea580c;
+    --warn-soft: #fff4e6;
+    --danger: #dc2626;
+    --danger-soft: #fee2e2;
+    --ok: #15803d;
+    --ok-soft: #e6f8ec;
+    --track: #e6ebf3;
+    --wind-rgb: 13, 148, 136;
+    --radius-sm: 10px;
+    --radius: 14px;
+    --radius-lg: 20px;
+    --radius-xl: 26px;
+    --shadow-1: 0 1px 2px rgba(11,18,32,.05), 0 1px 3px rgba(11,18,32,.04);
+    --shadow-2: 0 10px 26px -12px rgba(11,18,32,.20), 0 2px 8px rgba(11,18,32,.05);
+    --shadow-3: 0 32px 64px -32px rgba(11,18,32,.34);
+    --ring: 0 0 0 3px color-mix(in srgb, var(--brand) 28%, transparent);
+    --map-filter: none;
+    --ease: cubic-bezier(.2,.8,.2,1);
+  }
+
+  html[data-theme="dark"] {
+    --bg: #070c15;
+    --surface: #0f172a;
+    --surface-2: #131d31;
+    --surface-3: #1a2438;
+    --border: #1e2b42;
+    --border-2: #2c3b56;
+    --ink: #e9eefb;
+    --ink-2: #d3dcee;
+    --muted: #8798b6;
+    --muted-2: #6b7c9c;
+    --brand: #14b8a6;
+    --brand-2: #2dd4bf;
+    --brand-ink: #5eead4;
+    --brand-soft: rgba(20,184,166,.14);
+    --rain: #38bdf8;
+    --rain-soft: rgba(56,189,248,.13);
+    --warn: #fbbf24;
+    --warn-2: #fb923c;
+    --warn-soft: rgba(251,146,60,.14);
+    --danger: #f87171;
+    --danger-soft: rgba(248,113,113,.14);
+    --ok: #34d399;
+    --ok-soft: rgba(52,211,153,.14);
+    --track: #23314b;
+    --wind-rgb: 45, 212, 191;
+    --shadow-1: 0 1px 2px rgba(0,0,0,.5);
+    --shadow-2: 0 14px 34px -16px rgba(0,0,0,.85), 0 2px 8px rgba(0,0,0,.4);
+    --shadow-3: 0 32px 64px -32px rgba(0,0,0,.9);
+    --map-filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.9);
   }
 
   html, body { height: 100%; }
 
   body {
-    font-family: 'Fredoka', system-ui, -apple-system, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
     color: var(--ink);
-    background:
-      radial-gradient(circle at 15% 20%, #ffd1ec 0%, transparent 50%),
-      radial-gradient(circle at 85% 10%, #ffb3d9 0%, transparent 45%),
-      radial-gradient(circle at 75% 85%, #ffc2e6 0%, transparent 50%),
-      radial-gradient(circle at 20% 90%, #e0b3ff 0%, transparent 45%),
-      linear-gradient(135deg, #fff0f8 0%, #ffe3f3 50%, #ffd1ec 100%);
-    min-height: 100vh;
-    overflow-x: hidden;
-    position: relative;
-    font-size: 16px;
-    line-height: 1.6;
+    line-height: 1.5;
+    font-size: 15px;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    transition: background .35s var(--ease), color .35s var(--ease);
+    overflow-x: hidden;
   }
 
-  /* =====================================================
-     💅 START SCREEN (the prank)
-     ===================================================== */
-  .boot-screen {
+  body::before {
+    content: "";
     position: fixed;
     inset: 0;
-    z-index: 10000;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 30px 24px;
-    background:
-      radial-gradient(circle at 20% 30%, #ff2d95 0%, transparent 55%),
-      radial-gradient(circle at 80% 70%, #b388ff 0%, transparent 55%),
-      linear-gradient(135deg, #ff2d95 0%, #b388ff 100%);
-    color: #fff;
-    transition: opacity .8s ease, transform .8s ease;
-  }
-  .boot-screen.is-gone {
-    opacity: 0;
-    transform: scale(1.15);
     pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(820px 540px at 8% -12%, color-mix(in srgb, var(--brand) 12%, transparent), transparent 62%),
+      radial-gradient(760px 520px at 102% -6%, color-mix(in srgb, var(--rain) 10%, transparent), transparent 58%);
   }
-  .boot-screen::before {
+
+  .wrap { width: 100%; max-width: 1320px; margin: 0 auto; padding: 0 24px; }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 900;
+    background: color-mix(in srgb, var(--surface) 86%, transparent);
+    backdrop-filter: saturate(180%) blur(14px);
+    -webkit-backdrop-filter: saturate(180%) blur(14px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .topbar-in {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    height: 66px;
+  }
+
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+
+  .brand-mark {
+    width: 36px; height: 36px;
+    flex: 0 0 36px;
+    display: grid; place-items: center;
+    border-radius: 11px;
+    color: #fff;
+    background: linear-gradient(140deg, var(--brand-2), var(--brand-ink));
+    box-shadow: 0 6px 16px -8px color-mix(in srgb, var(--brand) 90%, transparent);
+  }
+
+  .brand-text { display: flex; flex-direction: column; min-width: 0; }
+
+  .brand-name {
+    font-size: 15px; font-weight: 800; letter-spacing: -.01em;
+    line-height: 1.15; color: var(--ink);
+  }
+
+  .brand-sub {
+    font-size: 10px; font-weight: 600; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--muted-2); line-height: 1.3;
+  }
+
+  .topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+  .gps {
+    display: inline-flex; align-items: center; gap: 8px;
+    height: 34px; padding: 0 13px;
+    border-radius: 999px;
+    background: var(--brand-soft);
+    border: 1px solid color-mix(in srgb, var(--brand) 26%, transparent);
+    color: var(--brand-ink);
+    font-size: 11.5px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .01em;
+    white-space: nowrap;
+  }
+
+  .gps-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--brand);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 55%, transparent);
+    animation: ping 2.2s var(--ease) infinite;
+    flex: 0 0 7px;
+  }
+
+  .gps[data-state="error"] { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 32%, transparent); color: var(--warn-2); }
+  .gps[data-state="error"] .gps-dot { background: var(--warn-2); animation: none; }
+
+  @keyframes ping {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 55%, transparent); }
+    70%  { box-shadow: 0 0 0 9px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+
+  .icon-btn {
+    width: 38px; height: 38px; flex: 0 0 38px;
+    display: grid; place-items: center;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+    transition: color .18s, border-color .18s, background .18s, transform .18s;
+  }
+  .icon-btn:hover { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 45%, transparent); background: var(--brand-soft); }
+  .icon-btn:active { transform: scale(.95); }
+  .icon-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .icon-btn.is-busy svg { animation: spin .9s linear infinite; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .shell { position: relative; z-index: 1; padding: 24px 0 64px; }
+
+  .skeleton-grid { display: flex; flex-direction: column; gap: 18px; }
+
+  .sk {
+    border-radius: var(--radius-lg);
+    background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
+    background-size: 400% 100%;
+    animation: shimmer 1.5s ease-in-out infinite;
+    border: 1px solid var(--border);
+  }
+
+  @keyframes shimmer {
+    0%   { background-position: 100% 0; }
+    100% { background-position: 0 0; }
+  }
+
+  .sk-hero { display: grid; grid-template-columns: 1fr 1.35fr; gap: 16px; }
+  .sk-hero .sk { height: 360px; }
+  .sk-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .sk-row .sk { height: 118px; }
+  .sk-row2 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .sk-row2 .sk { height: 260px; }
+
+  .error-card {
+    display: flex; gap: 16px; align-items: flex-start;
+    padding: 22px 24px;
+    border-radius: var(--radius-lg);
+    background: var(--danger-soft);
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    box-shadow: var(--shadow-1);
+  }
+  .error-icon { flex: 0 0 38px; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 11px; background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+  .error-title { font-size: 15px; font-weight: 800; color: var(--ink); }
+  .error-msg { font-size: 13.5px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    height: 38px; padding: 0 16px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background: var(--brand);
+    color: #fff;
+    font: inherit; font-size: 13px; font-weight: 700;
+    cursor: pointer;
+    transition: filter .18s, transform .18s, box-shadow .18s;
+  }
+  .btn:hover { filter: brightness(1.06); box-shadow: 0 8px 20px -10px color-mix(in srgb, var(--brand) 90%, transparent); }
+  .btn:active { transform: scale(.975); }
+  .btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn--ghost { background: var(--surface); color: var(--ink); border-color: var(--border-2); }
+  .btn--ghost:hover { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-soft); box-shadow: none; }
+
+  .loc-bar {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 20px; flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+
+  .loc-name {
+    font-size: clamp(22px, 3vw, 30px);
+    font-weight: 800;
+    letter-spacing: -.025em;
+    line-height: 1.15;
+    color: var(--ink);
+  }
+
+  .loc-sub {
+    font-size: 13px; font-weight: 500; color: var(--muted);
+    margin-top: 5px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+
+  .dot-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--muted-2); }
+
+  .stamp {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 30px; padding: 0 12px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 11.5px; font-weight: 700; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    box-shadow: var(--shadow-1);
+    white-space: nowrap;
+  }
+  .stamp b { color: var(--ink-2); font-weight: 700; }
+
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, .92fr) minmax(0, 1.28fr);
+    gap: 16px;
+    align-items: stretch;
+    margin-bottom: 14px;
+  }
+
+  .now-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: var(--radius-xl);
+    padding: 24px 26px 22px;
+    color: #fff;
+    background: linear-gradient(150deg, #0f766e 0%, #0d9488 42%, #14b8a6 78%, #2dd4bf 100%);
+    box-shadow: 0 24px 50px -28px rgba(13,148,136,.85), 0 2px 8px rgba(11,18,32,.06);
+    display: flex; flex-direction: column;
+    min-height: 360px;
+  }
+
+  html[data-theme="dark"] .now-card {
+    background: linear-gradient(150deg, #0b3b3a 0%, #0d5c56 45%, #0f766e 80%, #0d9488 100%);
+    box-shadow: 0 24px 50px -28px rgba(0,0,0,.9);
+  }
+
+  .now-card::before {
     content: "";
     position: absolute;
-    inset: 0;
-    background-image:
-      radial-gradient(circle, rgba(255,255,255,.35) 1px, transparent 1.5px),
-      radial-gradient(circle, rgba(255,255,255,.25) 1px, transparent 1.5px);
-    background-size: 70px 70px, 130px 130px;
-    background-position: 0 0, 43px 61px;
-    animation: sparkleDrift 20s linear infinite;
-    pointer-events: none;
-  }
-  @keyframes sparkleDrift {
-    to { background-position: 70px 70px, 173px 191px; }
-  }
-
-  .boot-inner {
-    position: relative;
-    z-index: 2;
-    max-width: 720px;
-    width: 100%;
-  }
-
-  .boot-kicker {
-    font-family: 'Bungee', cursive;
-    font-size: clamp(11px, 1.4vw, 13px);
-    letter-spacing: .35em;
-    text-transform: uppercase;
-    opacity: .85;
-    margin-bottom: 22px;
-    animation: blink 1.6s ease-in-out infinite;
-  }
-  @keyframes blink {
-    0%, 100% { opacity: .35; }
-    50%      { opacity: 1; }
-  }
-
-  .boot-logo {
-    font-family: 'Bungee', cursive;
-    font-size: clamp(44px, 11vw, 130px);
-    line-height: .9;
-    letter-spacing: -.01em;
-    color: #fff;
-    text-shadow:
-      4px 4px 0 rgba(0,0,0,.18),
-      0 0 60px rgba(255,255,255,.5);
-    margin-bottom: 20px;
-    animation: bootWobble 3s ease-in-out infinite;
-  }
-  @keyframes bootWobble {
-    0%, 100% { transform: rotate(-1.5deg) scale(1); }
-    50%      { transform: rotate(1.5deg) scale(1.03); }
-  }
-
-  .boot-sub {
-    font-family: 'Pacifico', cursive;
-    font-size: clamp(15px, 2.2vw, 22px);
-    line-height: 1.4;
-    opacity: .95;
-    margin-bottom: 34px;
-    text-shadow: 1px 1px 0 rgba(0,0,0,.18);
-  }
-
-  .boot-btn {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    padding: 22px 48px;
-    border: 0;
-    border-radius: 999px;
-    cursor: pointer;
-    font-family: 'Bungee', cursive;
-    font-size: clamp(14px, 2vw, 19px);
-    letter-spacing: .15em;
-    text-transform: uppercase;
-    color: #ff2d95;
-    background: #fff;
-    box-shadow:
-      0 10px 0 #ffc2e6,
-      0 22px 44px -14px rgba(0,0,0,.5);
-    transition: transform .15s ease, box-shadow .15s ease, background .2s ease;
-    animation: bootBtnPulse 2s ease-in-out infinite;
-  }
-  @keyframes bootBtnPulse {
-    0%, 100% { transform: scale(1); }
-    50%      { transform: scale(1.035); }
-  }
-  .boot-btn:hover {
-    background: #fff5fb;
-    transform: translateY(-3px) scale(1.05);
-    animation: none;
-    box-shadow:
-      0 13px 0 #ffc2e6,
-      0 28px 54px -14px rgba(0,0,0,.55);
-  }
-  .boot-btn:active {
-    transform: translateY(5px) scale(1.02);
-    box-shadow:
-      0 4px 0 #ffc2e6,
-      0 10px 22px -14px rgba(0,0,0,.45);
-  }
-  .boot-btn__dot {
-    width: 10px; height: 10px;
+    top: -110px; right: -90px;
+    width: 320px; height: 320px;
     border-radius: 50%;
-    background: #ff2d95;
-    box-shadow: 0 0 0 0 rgba(255,45,149,.55);
-    animation: bootDotPing 1.4s ease-out infinite;
-  }
-  @keyframes bootDotPing {
-    0%   { box-shadow: 0 0 0 0 rgba(255,45,149,.55); }
-    80%  { box-shadow: 0 0 0 14px rgba(255,45,149,0); }
-    100% { box-shadow: 0 0 0 0 rgba(255,45,149,0); }
-  }
-
-  .boot-warn {
-    margin-top: 26px;
-    font-family: 'Fredoka', sans-serif;
-    font-size: 11.5px;
-    letter-spacing: .12em;
-    text-transform: uppercase;
-    opacity: .6;
-    font-weight: 600;
-  }
-
-  .boot-fakebar {
-    margin-top: 30px;
-    max-width: 380px;
-    margin-left: auto;
-    margin-right: auto;
-  }
-  .boot-fakebar__label {
-    display: flex;
-    justify-content: space-between;
-    font-family: 'Bungee', cursive;
-    font-size: 10px;
-    letter-spacing: .18em;
-    text-transform: uppercase;
-    opacity: .8;
-    margin-bottom: 8px;
-  }
-  .boot-fakebar__track {
-    height: 8px;
-    border-radius: 999px;
-    background: rgba(255,255,255,.22);
-    overflow: hidden;
-  }
-  .boot-fakebar__fill {
-    height: 100%;
-    width: 0%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, #fff, #ffc2e6, #fff);
-    background-size: 200% 100%;
-    animation: fakeBar 3.6s ease-in-out infinite, hueSlide 3s linear infinite;
-  }
-  @keyframes fakeBar {
-    0%   { width: 0%; }
-    30%  { width: 22%; }
-    50%  { width: 22%; }
-    75%  { width: 78%; }
-    90%  { width: 78%; }
-    100% { width: 96%; }
-  }
-  @keyframes hueSlide { to { background-position: 200% 0; } }
-
-  /* =====================================================
-     🎵 YOUTUBE PLAYER (hidden iframe, audio kicks in)
-     ===================================================== */
-  .yt-hidden {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
+    background: radial-gradient(circle, rgba(255,255,255,.24), transparent 68%);
     pointer-events: none;
-    overflow: hidden;
-    border: 0;
-    z-index: -1;
   }
 
-  /* =====================================================
-     💖 MAIN CONTENT (revealed after boot)
-     ===================================================== */
-  .main-content {
-    opacity: 0;
-    transform: translateY(20px);
-    transition: opacity .9s ease .3s, transform .9s ease .3s;
-  }
-  .main-content.is-on {
-    opacity: 1;
-    transform: translateY(0);
-  }
-
-  /* ✨ MARQUEE ✨ */
-  .marquee {
-    position: relative;
-    z-index: 10;
-    overflow: hidden;
-    padding: 14px 0;
-    background: linear-gradient(90deg, #ff2d95, #ff7ac8, #b388ff, #ff2d95);
-    background-size: 300% 100%;
-    animation: marqueeBG 8s linear infinite;
-    color: #fff;
-    border-bottom: 4px solid #fff;
-    box-shadow: 0 6px 24px rgba(255,45,149,.35);
-  }
-  @keyframes marqueeBG { to { background-position: 300% 0; } }
-  .marquee__track {
-    display: flex;
-    gap: 60px;
-    width: max-content;
-    white-space: nowrap;
-    animation: marqueeMove 32s linear infinite;
-    font-family: 'Bungee', 'Fredoka', cursive;
-    font-size: 14px;
-    letter-spacing: .1em;
-    text-transform: uppercase;
-    text-shadow: 2px 2px 0 rgba(0,0,0,.18);
-  }
-  @keyframes marqueeMove {
-    from { transform: translateX(0); }
-    to   { transform: translateX(-50%); }
-  }
-
-  /* ✨ HERO ✨ */
-  .hero {
-    position: relative;
-    z-index: 2;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-    padding: 60px 20px 20px;
-  }
-
-  .logo {
-    font-family: 'Bungee', 'Fredoka', cursive;
-    font-size: clamp(56px, 15vw, 180px);
-    line-height: .9;
-    background: linear-gradient(135deg, #ff2d95 0%, #ff7ac8 30%, #b388ff 65%, #ff2d95 100%);
-    background-size: 200% 200%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    filter:
-      drop-shadow(4px 4px 0 #ffffff)
-      drop-shadow(6px 6px 0 #ffc2e6)
-      drop-shadow(10px 10px 30px rgba(255,45,149,.55));
-    animation: logoPulse 4s ease-in-out infinite;
-    letter-spacing: -.01em;
-    user-select: none;
-  }
-  @keyframes logoPulse {
-    0%, 100% { transform: scale(1) rotate(-2deg); background-position: 0% 50%; }
-    50%      { transform: scale(1.04) rotate(2deg); background-position: 100% 50%; }
-  }
-
-  .tagline {
-    font-family: 'Pacifico', cursive;
-    font-size: clamp(18px, 3.4vw, 34px);
-    color: #d1008f;
-    margin-top: 20px;
-    padding: 0 20px;
-    text-shadow: 2px 2px 0 rgba(255,255,255,.7);
-    line-height: 1.35;
-    max-width: 900px;
-  }
-
-  /* ✨ GIF CARD ✨ */
-  .gif-card {
-    position: relative;
-    z-index: 2;
-    width: min(480px, 92vw);
-    padding: 14px;
-    margin: 40px auto 24px;
-    border-radius: 30px;
-    background: linear-gradient(135deg, #ff7ac8, #b388ff, #ff2d95);
-    box-shadow:
-      0 0 0 4px #ffffff,
-      0 0 0 8px #ffc2e6,
-      0 0 0 12px #ffffff,
-      0 24px 60px -18px rgba(255,45,149,.75);
-    transform: rotate(-2deg);
-    animation: wiggle 6s ease-in-out infinite;
-    transition: transform .4s ease, box-shadow .4s ease;
-  }
-  @keyframes wiggle {
-    0%, 100% { transform: rotate(-2deg) scale(1); }
-    50%      { transform: rotate(2deg) scale(1.02); }
-  }
-  .gif-card:hover {
-    transform: rotate(0) scale(1.04);
-    animation: none;
-    box-shadow:
-      0 0 0 4px #ffffff,
-      0 0 0 8px #ffc2e6,
-      0 0 0 12px #ffffff,
-      0 30px 80px -18px rgba(255,45,149,.9);
-  }
-  .gif-card iframe {
-    display: block;
-    width: 100%;
-    border: 0;
-    border-radius: 22px;
-    aspect-ratio: 480 / 389;
-    background: #fff;
-  }
-  .gif-card__badge {
+  .now-card::after {
+    content: "";
     position: absolute;
-    top: -18px;
-    left: 50%;
-    transform: translateX(-50%) rotate(-3deg);
-    padding: 8px 18px;
+    bottom: -140px; left: -70px;
+    width: 280px; height: 280px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,.12), transparent 70%);
+    pointer-events: none;
+  }
+
+  .now-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; position: relative; z-index: 1;
+  }
+
+  .kicker {
+    font-size: 10px; font-weight: 800; letter-spacing: .17em;
+    text-transform: uppercase; opacity: .82;
+  }
+
+  .now-cond {
+    font-size: 12px; font-weight: 700;
+    padding: 5px 12px;
     border-radius: 999px;
-    background: #fff;
-    border: 3px solid #ff2d95;
-    color: #ff2d95;
-    font-family: 'Bungee', cursive;
-    font-size: 11px;
-    letter-spacing: .15em;
-    text-transform: uppercase;
+    background: rgba(255,255,255,.18);
+    border: 1px solid rgba(255,255,255,.26);
+    backdrop-filter: blur(6px);
     white-space: nowrap;
-    box-shadow: 0 6px 18px rgba(255,45,149,.35);
   }
 
-  /* ✨ MESSAGES ✨ */
-  .messages {
+  .now-temp {
+    display: flex; align-items: flex-start; gap: 2px;
+    margin: 16px 0 2px;
+    position: relative; z-index: 1;
+  }
+
+  .now-num {
+    font-size: clamp(64px, 9vw, 92px);
+    font-weight: 200;
+    line-height: .86;
+    letter-spacing: -.055em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .now-unit { font-size: 24px; font-weight: 500; margin-top: 6px; opacity: .9; }
+
+  .now-feels {
+    font-size: 13.5px; font-weight: 500; opacity: .9;
+    position: relative; z-index: 1;
+  }
+  .now-feels b { font-weight: 800; }
+
+  .now-foot {
+    margin-top: auto;
+    padding-top: 20px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    position: relative; z-index: 1;
+    border-top: 1px solid rgba(255,255,255,.22);
+  }
+
+  .now-foot > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .now-foot .k { font-size: 9.5px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; opacity: .72; }
+  .now-foot b { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+
+  .map-card {
     position: relative;
-    z-index: 2;
-    margin: 20px auto 30px;
-    max-width: 900px;
-    padding: 0 24px;
-    text-align: center;
-    min-height: 160px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .message {
-    font-family: 'Pacifico', cursive;
-    font-size: clamp(22px, 4.6vw, 46px);
-    line-height: 1.25;
-    transition: opacity .5s ease, transform .5s ease;
-    min-height: 2.6em;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .message.swap {
-    opacity: 0;
-    transform: translateY(12px) rotate(-2deg) scale(.96);
-  }
-  .message__inner {
-    background: linear-gradient(90deg, #ff2d95 0%, #b388ff 50%, #ff2d95 100%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: hueShift 5s linear infinite;
-    padding: 4px 12px;
-  }
-  @keyframes hueShift { to { background-position: 200% 0; } }
-
-  /* ✨ ACTION BUTTONS ✨ */
-  .actions-wrap {
-    position: relative;
-    z-index: 2;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 18px;
-    justify-content: center;
-    padding: 10px 20px 40px;
-  }
-  .vibe {
-    display: inline-block;
-    padding: 20px 36px;
-    border-radius: 999px;
-    background: linear-gradient(135deg, #ff2d95, #b388ff);
-    color: #fff;
-    text-decoration: none;
-    font-family: 'Bungee', cursive;
-    font-size: clamp(12px, 1.6vw, 15px);
-    letter-spacing: .12em;
-    text-transform: uppercase;
-    text-align: center;
-    box-shadow:
-      0 8px 0 #d1008f,
-      0 20px 40px -12px rgba(255,45,149,.7);
-    transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    text-shadow: 1px 1px 0 rgba(0,0,0,.15);
-    border: 0;
-    cursor: pointer;
-    font-family: 'Bungee', cursive;
-  }
-  .vibe:hover {
-    transform: translateY(-3px) rotate(-1deg);
-    box-shadow:
-      0 11px 0 #d1008f,
-      0 24px 50px -12px rgba(255,45,149,.8);
-    filter: brightness(1.06);
-  }
-  .vibe:active {
-    transform: translateY(4px);
-    box-shadow:
-      0 4px 0 #d1008f,
-      0 10px 20px -12px rgba(255,45,149,.6);
-  }
-  .vibe--mute {
-    background: #fff;
-    color: #ff2d95;
-    box-shadow:
-      0 8px 0 #ffc2e6,
-      0 20px 40px -12px rgba(255,45,149,.5);
-  }
-  .vibe--mute:hover {
-    box-shadow:
-      0 11px 0 #ffc2e6,
-      0 24px 50px -12px rgba(255,45,149,.6);
-    background: #fff5fb;
-  }
-  .vibe--mute:active {
-    box-shadow:
-      0 4px 0 #ffc2e6,
-      0 10px 20px -12px rgba(255,45,149,.4);
-  }
-
-  /* ✨ FOOTER ✨ */
-  .footer {
-    position: relative;
-    z-index: 2;
-    text-align: center;
-    padding: 30px 20px 80px;
-    font-family: 'Pacifico', cursive;
-    font-size: clamp(16px, 2.4vw, 24px);
-    color: #d1008f;
-    text-shadow: 1px 1px 0 rgba(255,255,255,.7);
-    line-height: 1.5;
-  }
-  .footer small {
-    display: block;
-    font-family: 'Fredoka', sans-serif;
-    font-size: 11px;
-    color: #a03a78;
-    margin-top: 18px;
-    letter-spacing: .18em;
-    text-transform: uppercase;
-    text-shadow: none;
-    font-weight: 600;
-  }
-
-  /* ✨ FLOATERS ✨ */
-  .floater {
-    position: fixed;
-    bottom: -60px;
-    z-index: 1;
-    pointer-events: none;
-    animation: floatUp linear infinite;
-    opacity: 0;
-    user-select: none;
-  }
-  @keyframes floatUp {
-    0%   { transform: translateY(0) rotate(0); opacity: 0; }
-    10%  { opacity: .8; }
-    90%  { opacity: .8; }
-    100% { transform: translateY(-120vh) rotate(360deg); opacity: 0; }
-  }
-
-  /* ✨ CURSOR SPARKLES ✨ */
-  .sparkle {
-    position: fixed;
-    pointer-events: none;
-    z-index: 9999;
-    font-size: 18px;
-    animation: sparkleFloat .9s cubic-bezier(.2,.8,.2,1) forwards;
-    transform: translate(-50%, -50%);
-    user-select: none;
-  }
-  @keyframes sparkleFloat {
-    0%   { transform: translate(-50%, -50%) scale(1.2); opacity: 1; }
-    100% { transform: translate(-50%, -180%) scale(.4) rotate(60deg); opacity: 0; }
-  }
-
-  /* ✨ DECORATIVE STARS ✨ */
-  .star {
-    position: fixed;
-    pointer-events: none;
-    z-index: 1;
-    animation: twinkle 3s ease-in-out infinite;
-    user-select: none;
-  }
-  @keyframes twinkle {
-    0%, 100% { opacity: .3; transform: scale(.8) rotate(0); }
-    50%      { opacity: 1; transform: scale(1.3) rotate(20deg); }
-  }
-
-  @media (max-width: 640px) {
-    .hero { padding: 40px 16px 12px; }
-    .gif-card { margin-top: 34px; }
-    .message { min-height: 2.8em; }
-    .boot-btn { padding: 18px 34px; }
-  }
-</style>
-</head>
-<body>
-
-<!-- =====================================================
-     💅 BOOT SCREEN (the prank)
-     ===================================================== -->
-<div class="boot-screen" id="bootScreen">
-  <div class="boot-inner">
-    <div class="boot-kicker">◉ system initializing ◉</div>
-    <div class="boot-logo">BARBIE&nbsp;OS</div>
-    <div class="boot-sub">defense is here… but luckily i'm pretty barbie</div>
-
-    <button class="boot-btn" id="startBtn" type="button">
-      <span class="boot-btn__dot"></span>
-      <span>START THE SYSTEM</span>
-      <span class="boot-btn__dot"></span>
-    </button>
-
-    <div class="boot-fakebar">
-      <div class="boot-fakebar__label">
-        <span>loading vibes</span>
-        <span>100% plastic</span>
-      </div>
-      <div class="boot-fakebar__track">
-        <div class="boot-fakebar__fill"></div>
-      </div>
-    </div>
-
-    <div class="boot-warn">⚠ real system will not be started ⚠</div>
-  </div>
-</div>
-
-<!-- =====================================================
-     🎵 YOUTUBE (hidden, audio only after click)
-     ===================================================== -->
-<div id="ytHolder" style="position:fixed;bottom:0;right:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;z-index:-1;"></div>
-
-<!-- =====================================================
-     💖 MAIN CONTENT
-     ===================================================== -->
-<div class="main-content" id="mainContent">
-
-  <div class="marquee" aria-hidden="true">
-    <div class="marquee__track">
-      <span>💖 hi barbie! 💖</span>
-      <span>✨ come on barbie, let's go party ✨</span>
-      <span>🎀 defense is here… but luckily i'm pretty barbie 🎀</span>
-      <span>💅 life in plastic, it's fantastic 💅</span>
-      <span>🌸 barbie girl, barbie girl 🌸</span>
-      <span>🪩 make it pink! 🪩</span>
-      <span>💖 hi barbie! 💖</span>
-      <span>✨ come on barbie, let's go party ✨</span>
-      <span>🎀 defense is here… but luckily i'm pretty barbie 🎀</span>
-      <span>💅 life in plastic, it's fantastic 💅</span>
-      <span>🌸 barbie girl, barbie girl 🌸</span>
-      <span>🪩 make it pink! 🪩</span>
-    </div>
-  </div>
-
-  <main>
-    <section class="hero">
-      <h1 class="logo">BARBIE</h1>
-      <p class="tagline">defense is here… but luckily i'm pretty barbie 💖</p>
-    </section>
-
-    <div class="gif-card">
-      <div class="gif-card__badge">✨ now playing ✨</div>
-      <iframe
-        src="https://giphy.com/embed/dvILshvavCEaM2tIWa"
-        width="480" height="389"
-        frameBorder="0"
-        class="giphy-embed"
-        allowFullScreen
-        title="barbie mood"></iframe>
-    </div>
-
-    <section class="messages">
-      <div class="message" id="msg">
-        <span class="message__inner">barbie girl, barbie girl 💖</span>
-      </div>
-    </section>
-
-    <div class="actions-wrap">
-      <a href="https://ibb.co/60Dj9swV" target="_blank" rel="noopener" class="vibe">
-        🎀 open the vibe board 🎀
-      </a>
-      <button class="vibe vibe--mute" id="muteBtn" type="button">
-        🔊 mute the anthem
-      </button>
-    </div>
-
-    <footer class="footer">
-      💖 hi barbie! hi ken! hi allan! 💖
-      <small>via GIPHY · 100% plastic, 0% tragic</small>
-    </footer>
-  </main>
-
-</div>
-
-<script>
-(function () {
-  'use strict';
-
-  /* =====================================================
-     💅 BOOT → PLAY MUSIC → REVEAL
-     ===================================================== */
-  var YT_VIDEO_ID = 'gsyha_CeetM';
-  var ytPlayer = null;
-  var ytReady = false;
-  var ytMuted = false;
-
-  var bootScreen = document.getElementById('bootScreen');
-  var startBtn   = document.getElementById('startBtn');
-  var mainContent = document.getElementById('mainContent');
-  var ytHolder   = document.getElementById('ytHolder');
-  var muteBtn    = document.getElementById('muteBtn');
-
-  // Inject YouTube IFrame API (loaded async, but start click will wait)
-  var ytApiReady = false;
-  window.onYouTubeIframeAPIReady = function () {
-    ytApiReady = true;
-  };
-
-  (function loadYTAPI() {
-    var tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    document.head.appendChild(tag);
-  })();
-
-  function createPlayer() {
-    if (!ytApiReady) {
-      // try again shortly
-      setTimeout(createPlayer, 100);
-      return;
-    }
-    if (ytPlayer) return;
-
-    var playerDiv = document.createElement('div');
-    playerDiv.id = 'ytPlayerDiv';
-    ytHolder.appendChild(playerDiv);
-
-    ytPlayer = new YT.Player('ytPlayerDiv', {
-      height: '1',
-      width: '1',
-      videoId: YT_VIDEO_ID,
-      playerVars: {
-        autoplay: 1,
-        controls: 0,
-        disablekb: 1,
-        fs: 0,
-        modestbranding: 1,
-        playsinline: 1,
-        rel: 0,
-        loop: 1,
-        playlist: YT_VIDEO_ID
-      },
-      events: {
-        onReady: function (e) {
-          ytReady = true;
-          e.target.setVolume(80);
-          e.target.playVideo();
-        },
-        onStateChange: function (e) {
-          // if somehow paused, keep it looping
-          if (e.data === 0) e.target.playVideo();
-        }
-      }
-    });
-  }
-
-  function startBarbie() {
-    // 1. Kick off music (user gesture = allowed to autoplay)
-    createPlayer();
-
-    // 2. Fade out boot screen
-    bootScreen.classList.add('is-gone');
-
-    // 3. Reveal main content
-    setTimeout(function () {
-      mainContent.classList.add('is-on');
-      bootScreen.style.display = 'none';
-    }, 500);
-
-    // 4. Explosion of sparkles for good measure
-    var rect = startBtn.getBoundingClientRect();
-    burstSparkles(rect.left + rect.width / 2, rect.top + rect.height / 2, 24);
-  }
-
-  startBtn.addEventListener('click', startBarbie);
-
-  /* Mute toggle */
-  muteBtn.addEventListener('click', function () {
-    if (!ytPlayer || !ytReady) return;
-    ytMuted = !ytMuted;
-    if (ytMuted) {
-      ytPlayer.mute();
-      muteBtn.textContent = '🔇 unmute the anthem';
-    } else {
-      ytPlayer.unMute();
-      muteBtn.textContent = '🔊 mute the anthem';
-    }
-  });
-
-  /* =====================================================
-     ✨ ROTATING BARBIE MESSAGES
-     ===================================================== */
-  var MESSAGES = [
-    'barbie girl, barbie girl 💖',
-    'defense is here… but luckily i\\'m pretty barbie ✨',
-    'come on barbie, let\\'s go party 🪩',
-    'LIFE IN PLASTIC, IT\\'S FANTASTIC 💅',
-    'hi barbie! hi ken! hi allan! 👋',
-    'i\\'m a barbie girl, in a barbie world 🌍',
-    '100% plastic, 0% tragic 💖',
-    'MALIBU DREAMHOUSE SAYS HI 🌴',
-    'make it pink! 🎀',
-    'you can brush my hair, undress me everywhere 💇‍♀️',
-    'imagination, life is your creation ✨',
-    'come on barbie let\\'s go party (ah ah ah yeah) 🎵'
-  ];
-
-  var msgEl = document.getElementById('msg');
-  var msgInner = msgEl.querySelector('.message__inner');
-  var msgIdx = 0;
-
-  setInterval(function () {
-    msgEl.classList.add('swap');
-    setTimeout(function () {
-      msgIdx = (msgIdx + 1) % MESSAGES.length;
-      msgInner.textContent = MESSAGES[msgIdx];
-      msgEl.classList.remove('swap');
-    }, 500);
-  }, 3800);
-
-  /* =====================================================
-     ✨ SPARKLE BURST HELPER
-     ===================================================== */
-  var EMOJIS = ['✨','💖','🌸','💅','🎀','⭐','💕','🦋','🩷','💫'];
-
-  function burstSparkles(x, y, count) {
-    for (var i = 0; i < count; i++) {
-      (function (i) {
-        var s = document.createElement('div');
-        s.className = 'sparkle';
-        s.textContent = EMOJIS[Math.floor(Math.random() * EMOJIS.length)];
-        s.style.left = x + 'px';
-        s.style.top = y + 'px';
-        s.style.animation = 'none';
-        var angle = (Math.PI * 2 * i) / count;
-        var dist = 90 + Math.random() * 160;
-        var dx = Math.cos(angle) * dist;
-        var dy = Math.sin(angle) * dist;
-        s.animate(
-          [
-            { transform: 'translate(-50%, -50%) scale(1.2) rotate(0)', opacity: 1 },
-            { transform: 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px)) scale(.3) rotate(180deg)', opacity: 0 }
-          ],
-          { duration: 900 + Math.random() * 400, easing: 'cubic-bezier(.2,.8,.2,1)' }
-        );
-        document.body.appendChild(s);
-        setTimeout(function () { s.remove(); }, 1400);
-      })(i);
-    }
-  }
-
-  /* =====================================================
-     ✨ CURSOR SPARKLES
-     ===================================================== */
-  var lastSparkle = 0;
-  document.addEventListener('mousemove', function (e) {
-    var now = Date.now();
-    if (now - lastSparkle < 55) return;
-    lastSparkle = now;
-    var s = document.createElement('div');
-    s.className = 'sparkle';
-    s.textContent = EMOJIS[Math.floor(Math.random() * EMOJIS.length)];
-    s.style.left = e.clientX + 'px';
-    s.style.top = e.clientY + 'px';
-    document.body.appendChild(s);
-    setTimeout(function () { s.remove(); }, 950);
-  });
-
-  document.addEventListener('click', function (e) {
-    burstSparkles(e.clientX, e.clientY, 10);
-  });
-
-  /* =====================================================
-     ✨ FLOATERS + STARS
-     ===================================================== */
-  var FLOATERS = ['💖','💕','✨','🌸','🎀','💅','⭐','🦋','🌴','💫','🩷','🎠','🌷','🎵'];
-  for (var i = 0; i < 26; i++) {
-    var f = document.createElement('div');
-    f.className = 'floater';
-    f.textContent = FLOATERS[Math.floor(Math.random() * FLOATERS.length)];
-    f.style.left = Math.random() * 100 + '%';
-    f.style.animationDelay = (Math.random() * 20) + 's';
-    f.style.animationDuration = (14 + Math.random() * 22) + 's';
-    f.style.fontSize = (16 + Math.random() * 30) + 'px';
-    document.body.appendChild(f);
-  }
-
-  var STARS = ['✦','✧','★','☆','✩'];
-  for (var j = 0; j < 12; j++) {
-    var st = document.createElement('div');
-    st.className = 'star';
-    st.textContent = STARS[Math.floor(Math.random() * STARS.length)];
-    st.style.left = Math.random() * 100 + '%';
-    st.style.top = Math.random() * 100 + '%';
-    st.style.fontSize = (14 + Math.random() * 30) + 'px';
-    st.style.color = Math.random() > .5 ? '#ff2d95' : '#b388ff';
-    st.style.animationDelay = (Math.random() * 3) + 's';
-    st.style.animationDuration = (2 + Math.random() * 4) + 's';
-    document.body.appendChild(st);
-  }
-})();
-</script>
-
-</body>
-</html>`;
-
-const server = http.createServer((req, res) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405, { 'Content-Type': 'text/plain' });
-    res.end('method not allowed');
-    return;
-  }
-  res.writeHead(200, {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store'
-  });
-  res.end(PAGE);
-});
-
-server.listen(PORT, () => {
-  console.log("💖 barbie server running at http://localhost:" + PORT);
-  console.log("   🎵 now with a fake 'start the system' button");
-  console.log("   come on barbie, let's go party 🪩");
-});
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+    border: 1px solid var(--bo
